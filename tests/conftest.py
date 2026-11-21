@@ -78,6 +78,16 @@ class _FakePluginBase:
         return None
 
 
+def _host_plugin_package_dirs() -> list[str]:
+    """插件挂进 N.E.K.O 的 plugin/plugins 后，测试会被导入成
+    plugin.plugins.temporal_memory.tests.*，需要 plugin.plugins 能解析。
+    独立目录（打包前的源码树）找不到宿主 plugin 包，返回空表保持隔离。"""
+    for base in Path(__file__).resolve().parents[:4]:
+        if (base / 'plugins').is_dir() and (base / 'sdk').is_dir():
+            return [str(base)]
+    return []
+
+
 def _install_fake_sdk() -> None:
     if 'plugin.sdk.plugin' in sys.modules:
         return
@@ -95,7 +105,9 @@ def _install_fake_sdk() -> None:
     sdk.tr = lambda key, default=None, **_kw: default if default is not None else key
 
     package = types.ModuleType('plugin')
-    package.__path__ = []  # 声明为包，避免真实包的导入路径干扰
+    # 空表只挡真实 SDK 的子包；挂进宿主时补上真实 plugin 包路径，
+    # 否则 plugin.plugins 不可导入，测试在 CI 里全部 collect error。
+    package.__path__ = _host_plugin_package_dirs()
     sdk_pkg = types.ModuleType('plugin.sdk')
     sdk_pkg.__path__ = []
     package.sdk = sdk_pkg
