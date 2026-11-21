@@ -129,7 +129,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 await self._run_maintenance(character, engine)
         self._ready = True
         self.report_status({'ready': True, 'stats': self._aggregate_stats(),
-                            'legacy_ignored': legacy_ignored})
+                            'legacy_ignored': legacy_ignored,
+                            'maintenance_errors': dict(self._maintenance_errors)})
         return Ok({'status': 'ready', 'legacy_ignored': legacy_ignored})
 
     @lifecycle(id="shutdown")
@@ -367,35 +368,49 @@ class TemporalMemoryPlugin(NekoPluginBase):
         working: list[dict[str, Any]] = []
         orphan_truncated = False
         archived_truncated = False
+        read_errors: list[str] = []
         for character, engine in self._engines.items():
-            for item in engine.list_memories(
-                    300, statuses=('active', 'dormant')):
-                item['character'] = character
-                memories.append(item)
-            batch = engine.list_memories(121, statuses=('archived',))
-            if len(batch) > 120:
-                archived_truncated = True
-                batch = batch[:120]
-            for item in batch:
-                item['character'] = character
-                archived.append(item)
-            for turn in engine.store.recent_turns(self._working_window()):
-                turn['character'] = character
-                working.append(turn)
-            for item in engine.store.pending_conflicts():
-                item['character'] = character
-                item['table'] = item.pop('table_name', item.get('table') or '')
-                item['text'] = item.get('content') or ''
-                conflicts.append(item)
-            batch = engine.store.orphan_pending(121)
-            if len(batch) > 120:
-                orphan_truncated = True
-                batch = batch[:120]
-            for item in batch:
-                item['character'] = character
-                item['table'] = item.pop('table_name', item.get('table') or '')
-                item['text'] = item.get('content') or ''
-                orphans.append(item)
+            # 单个库读失败只跳过它：面板其余角色照常刷新，坏库名报到状态里
+            marks = (len(memories), len(archived), len(conflicts),
+                     len(orphans), len(working))
+            try:
+                for item in engine.list_memories(
+                        300, statuses=('active', 'dormant')):
+                    item['character'] = character
+                    memories.append(item)
+                batch = engine.list_memories(121, statuses=('archived',))
+                if len(batch) > 120:
+                    archived_truncated = True
+                    batch = batch[:120]
+                for item in batch:
+                    item['character'] = character
+                    archived.append(item)
+                for turn in engine.store.recent_turns(self._working_window()):
+                    turn['character'] = character
+                    working.append(turn)
+                for item in engine.store.pending_conflicts():
+                    item['character'] = character
+                    item['table'] = item.pop('table_name', item.get('table') or '')
+                    item['text'] = item.get('content') or ''
+                    conflicts.append(item)
+                batch = engine.store.orphan_pending(121)
+                if len(batch) > 120:
+                    orphan_truncated = True
+                    batch = batch[:120]
+                for item in batch:
+                    item['character'] = character
+                    item['table'] = item.pop('table_name', item.get('table') or '')
+                    item['text'] = item.get('content') or ''
+                    orphans.append(item)
+            except Exception as exc:
+                # 回滚这个库已经追加的部分，避免面板出现“半个角色”
+                for name, count in zip(
+                        (memories, archived, conflicts, orphans, working), marks,
+                        strict=True):
+                    del name[count:]
+                read_errors.append(character)
+                self.logger.warning(
+                    '读取角色库失败(%s): %s', character or '默认库', exc)
         memories.sort(key=lambda item: (item.get('pinned') not in (1, True),
                                         item.get('status') != 'active',
                                         -int(item.get('ts') or 0)))
@@ -422,8 +437,11 @@ class TemporalMemoryPlugin(NekoPluginBase):
         return {
             'config': dict(self._settings),
             'status': {'ready': self._ready, 'stats': self._aggregate_stats(),
-                       'legacy_ignored': self._legacy_ignored},
+                       'legacy_ignored': self._legacy_ignored,
+                       'maintenance_errors': dict(self._maintenance_errors)},
             'capacity': {'per_role': MAX_TOTAL_MEMORIES, 'max_engines': MAX_ENGINES},
+            'read_errors': read_errors,
+            'maintenance_errors': dict(self._maintenance_errors),
             'memories': memories[:240],
             'memories_truncated': len(memories) > 240,
             'archived': archived,
@@ -1357,13 +1375,20 @@ class TemporalMemoryPlugin(NekoPluginBase):
                                  'working_turns': 0, 'turn_no': 0,
                                  'characters': len(self._engines),
                                  'fts_mode': 'unknown', 'pending_conflicts': 0,
-                                 'unique_index_skipped': []}
+                                 'unique_index_skipped': [], 'stats_errors': []}
         tiers = {'hot': 0, 'warm': 0, 'cold': 0}
         statuses: dict[str, int] = {}
         max_role_used = 0
         skipped: list[str] = []
-        for engine in self._engines.values():
-            stats = engine.store.stats()
+        for character, engine in self._engines.items():
+            try:
+                stats = engine.store.stats()
+            except Exception as exc:
+                # 单库统计失败不能拖垮整张状态卡：跳过它并记下角色名
+                total['stats_errors'].append(character)
+                self.logger.warning(
+                    '统计角色库失败(%s): %s', character or '默认库', exc)
+                continue
             for key in ('anchors', 'semantics', 'edges', 'working_turns', 'turn_no',
                         'pending_conflicts'):
                 total[key] += int(stats.get(key) or 0)

@@ -295,3 +295,10 @@
 - 删除联动给预览：`workmem_hits` 是文本相似匹配，面板弹窗列「角色 ｜ 时间 ／ 原文（60 字内，最多 8 行）」，i18n 新增 `ui.confirm.working_hits_line`，message 注明可能命中相近的行。
 - null 不遍历：`delete_memory` / `delete_working_turn` 把 `None` 归一化成空串；`_delete_candidates(character: str)` 删除“全库排一遍”分支，两处 `input_schema` 文案同步。目标库打不开直接报错，不再翻其他库。
 - 版本 0.5.15，测试数 215 项（214 passed + 1 skipped）/ 209 个 `def test_`。
+
+## 32. 读取路径容错与口径收紧（0.5.16）
+
+- `_settings_snapshot` 逐库 try/except：坏库跳过并回滚半截追加的数据，坏库名回 `read_errors`；`_aggregate_stats` 同理回 `stats_errors`，全坏库返回零值。
+- `_maintenance_errors` 进快照与 `status`，启动 `report_status` 一并带出；面板状态卡加 `ui.status.read_errors` / `ui.status.maintenance_errors` 两条警告（两 locale 各 195 键）。
+- `secure_delete` 口径：README/guide 改“释放的数据库页擦拭为零”，补 WAL、导出 JSON、`*.migrated` 备份、磁盘快照的明文边界；删除路径不变（实测未复现 FTS 词条残留）。
+- 版本 0.5.16，测试数 222 项（221 passed + 1 skipped）/ 216 个 `def test_`。

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.16
+
+补 0.5.15 changelog 之外被点出的两处读取路径问题，并把 `secure_delete` 的口径收窄：
+
+- 面板读取逐库容错：`_settings_snapshot` 每个角色库包 try/except，失败只跳过该库，并把已经追加到一半的记忆/归档/冲突/孤儿/工作记忆按长度回滚，避免面板出现“半个角色”；坏库名回 `read_errors`，同时写日志。
+- 状态统计逐库容错：`_aggregate_stats` 单库 `stats()` 抛错只跳过并记 `stats_errors`，其余库的锚点/偏好/边/占用照常汇总；全部坏库时返回零值而不是抛异常。
+- 维护错误可见：`_maintenance_errors` 进 `_settings_snapshot` 的 `maintenance_errors` 与 `status.maintenance_errors`，启动 `report_status` 一并上报；面板状态卡新增两条警告（`ui.status.read_errors` / `ui.status.maintenance_errors`，中英各补 1 键，两个 locale 195 键同构）。
+- `secure_delete` 说法收窄：README 与 guide 不再写“零覆盖”，改为“删除时释放的数据库页擦拭为零”，并写明 WAL 未截断前的旧页、导出 JSON、`*.migrated` 迁移备份、磁盘快照仍可能是明文。实测（20 条删 1、400 条多段删 1，唯一 trigram 扫描）单条删除后 FTS 词条未在数据库文件中留存，因此不改删除路径，只纠正承诺范围。
+- 测试新增 7 项（`tests/test_aggregate_resilience.py`）：坏库不拖垮统计/面板、半截数据回滚、全坏库返回零值、维护错误进快照、面板与 locale 覆盖新键、文档不再出现绝对措辞。
+- 版本 0.5.16，测试数 222 项（221 passed + 1 skipped）/ 216 个 `def test_`。
+
 ## 0.5.15
 
 A1351 安全性与记忆影响（对 0.5.14 的静态复读，覆盖约四成代码、未跑测试）结论是「能发、无阻断项」：上架审查三处已落实、空串删错库已修、安全面无新增风险。新挑出的四处轻项全部核实成立，逐条收口：

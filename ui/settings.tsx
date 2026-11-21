@@ -87,9 +87,12 @@ type MemoryState = {
   pending_alert_days?: number
   pending_overdue?: number
   pending_oldest_days?: number
+  read_errors?: string[]
+  maintenance_errors?: Record<string, string>
   status?: {
     ready?: boolean
     legacy_ignored?: boolean
+    maintenance_errors?: Record<string, string>
     stats?: {
       anchors?: number
       semantics?: number
@@ -102,6 +105,7 @@ type MemoryState = {
       max_role_used?: number
       pending_conflicts?: number
       unique_index_skipped?: string[]
+      stats_errors?: string[]
     }
   }
 }
@@ -428,6 +432,18 @@ export default function TemporalMemorySettings(
             {(props.state?.status?.stats?.unique_index_skipped?.length ?? 0) > 0 && (
               <Alert tone="warning">
                 {t("ui.status.unique_index_skipped")}
+              </Alert>
+            )}
+            {(props.state?.read_errors?.length ?? 0) > 0 && (
+              <Alert tone="danger">
+                {t("ui.status.read_errors", { count: props.state?.read_errors?.length ?? 0 })}
+              </Alert>
+            )}
+            {Object.keys(props.state?.maintenance_errors || {}).length > 0 && (
+              <Alert tone="warning">
+                {t("ui.status.maintenance_errors", {
+                  count: Object.keys(props.state?.maintenance_errors || {}).length,
+                })}
               </Alert>
             )}
             <Inline align="center" justify="space-between">

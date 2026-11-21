@@ -43,6 +43,8 @@
   "ui.status.title": "Memory status",
   "ui.status.legacy_ignored": "An old memory.db coexists with character databases: only character databases are mounted, the old one is not loaded and does not appear below.",
   "ui.status.unique_index_skipped": "The old database has duplicate event rows, so the unique index could not be created. New writes still check for duplicates first, but exporting and cleaning up the duplicates is recommended.",
+  "ui.status.read_errors": "{{count}} character database(s) failed to load and were skipped; other characters still show. See the plugin log for details.",
+  "ui.status.maintenance_errors": "Maintenance failed for {{count}} character database(s) and was skipped; the record clears itself after a successful run.",
   "ui.status.running_label": "Status",
   "ui.status.running": "Running",
   "ui.status.not_ready": "Not ready",

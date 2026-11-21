@@ -43,6 +43,8 @@
   "ui.status.title": "记忆状态",
   "ui.status.legacy_ignored": "检测到旧的 memory.db 与角色库并存：当前只挂载角色库，旧库没有载入，也不会出现在下面列表里。",
   "ui.status.unique_index_skipped": "旧库存在重复事件行，唯一索引未能建立；新写入仍会前置查重，但建议导出后清理重复条目。",
+  "ui.status.read_errors": "有 {{count}} 个角色库读取失败，已跳过；其余角色照常显示，详情见插件日志。",
+  "ui.status.maintenance_errors": "有 {{count}} 个角色库维护失败，已跳过；修好后下次维护会自动清除记录。",
   "ui.status.running_label": "运行状态",
   "ui.status.running": "运行中",
   "ui.status.not_ready": "未就绪",
