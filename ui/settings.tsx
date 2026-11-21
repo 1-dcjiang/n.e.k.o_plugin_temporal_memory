@@ -53,6 +53,7 @@ type WorkingTurn = {
   ts?: number
   role?: string
   content?: string
+  preview?: string
   character?: string
 }
 
@@ -201,6 +202,18 @@ export default function TemporalMemorySettings(
     setValues({ ...values, [key]: value })
   }
 
+  function workingHitLines(hits: WorkingTurn[]): string {
+    // 只给要删的那几行原文预览：文本匹配可能命中相近的行，删前让人自己看一眼
+    return hits
+      .slice(0, 8)
+      .map((hit) => t("ui.confirm.working_hits_line", {
+        role: isAssistantRole(hit.role) ? t("ui.working.role_assistant") : t("ui.working.role_user"),
+        time: hit.ts ? new Date(hit.ts * 1000).toLocaleString() : "",
+        text: (hit.preview || hit.content || "").slice(0, 60),
+      }))
+      .join("\n")
+  }
+
   async function save() {
     const payload: Record<string, unknown> = { enabled }
     for (const field of NUMERIC_FIELDS) {
@@ -336,7 +349,7 @@ export default function TemporalMemorySettings(
     if (!hits || hits.length === 0) return
     const alsoDelete = await confirm({
       title: t("ui.confirm.working_hits_title"),
-      message: t("ui.confirm.working_hits_message", { count: hits.length }),
+      message: `${t("ui.confirm.working_hits_message", { count: hits.length })}\n\n${workingHitLines(hits)}`,
       tone: "danger",
       confirmLabel: t("ui.confirm.delete_together"),
       cancelLabel: t("ui.confirm.keep_for_now"),
@@ -625,7 +638,7 @@ export default function TemporalMemorySettings(
                   turns: Math.ceil(workingWindow / 2),
                 })}
               </Alert>
-              {workingMemory.slice(0, 40).map((turn, index) => (
+              {workingMemory.map((turn, index) => (
                 <Card
                   key={`${turn.character || ""}:${turn.id ?? index}`}
                   title={`${isAssistantRole(turn.role) ? t("ui.working.role_assistant") : t("ui.working.role_user")} | ${turn.ts ? new Date(turn.ts * 1000).toLocaleString() : ""}${turn.character ? ` | ${turn.character}` : ""}`}

@@ -287,3 +287,11 @@
 - 面板 i18n：把所有硬编码中文换成 `props.t("ui.*")`；两个 locale 键集同构（192 键），补全 6 个缺失入口文案；面板与 i18n 用测试互相锁定（引用必须存在、不许有死键、除注释外不许出现中文）。
 - 维护容错：`_run_maintenance` 包住逐库 `engine.maintenance`，异常只记警告与 `_maintenance_errors`；启动与定时器都不再被单个坏库打断，恢复后自动清除错误记录。
 - 版本 0.5.14，测试数 205 项 / 199 个 `def test_`。
+
+## 31. A1351 复核轻项（0.5.15）
+
+- 面板窗口跟随：`_settings_snapshot` 改用 `self._working_window()`（读 `working_window`、`None` 补 8、坏值回 8、夹 0–50），面板去掉 `slice(0, 40)`，窗口调大后续行可见可删；窗口为 0 如实显示 0 行。
+- 启动维护受总开关约束：`on_startup` 里逐库 `_run_maintenance` 包 `if self._settings.get('enabled', True)`，与定时器同口径。
+- 删除联动给预览：`workmem_hits` 是文本相似匹配，面板弹窗列「角色 ｜ 时间 ／ 原文（60 字内，最多 8 行）」，i18n 新增 `ui.confirm.working_hits_line`，message 注明可能命中相近的行。
+- null 不遍历：`delete_memory` / `delete_working_turn` 把 `None` 归一化成空串；`_delete_candidates(character: str)` 删除“全库排一遍”分支，两处 `input_schema` 文案同步。目标库打不开直接报错，不再翻其他库。
+- 版本 0.5.15，测试数 215 项（214 passed + 1 skipped）/ 209 个 `def test_`。

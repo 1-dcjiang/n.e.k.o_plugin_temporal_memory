@@ -123,8 +123,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
                     # 没有 owner 的旧库名不带哈希；新库若没写 owner 就不自动猜角色。
                     if name and not re.search(r'-[0-9a-f]{8}$', name):
                         await self._ensure_engine(name)
-        for character, engine in list(self._engines.items()):
-            await self._run_maintenance(character, engine)
+        if self._settings.get('enabled', True):
+            # 总开关关闭时和定时器保持同一口径：不做休眠沉降，避免空转
+            for character, engine in list(self._engines.items()):
+                await self._run_maintenance(character, engine)
         self._ready = True
         self.report_status({'ready': True, 'stats': self._aggregate_stats(),
                             'legacy_ignored': legacy_ignored})
@@ -377,7 +379,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
             for item in batch:
                 item['character'] = character
                 archived.append(item)
-            for turn in engine.store.recent_turns(8):
+            for turn in engine.store.recent_turns(self._working_window()):
                 turn['character'] = character
                 working.append(turn)
             for item in engine.store.pending_conflicts():
@@ -771,7 +773,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
             'properties': {
                 'table': {'type': 'string', 'enum': ['anchors', 'semantics']},
                 'id': {'type': 'string'},
-                'character': {'type': 'string', 'description': '条目所属角色库，空串表示默认库'},
+                'character': {'type': 'string',
+                              'description': '条目所属角色库；空串或不传表示默认库，不会遍历所有库'},
                 'confirmed': {'type': 'boolean'},
             },
             'required': ['table', 'id', 'confirmed'],
@@ -785,6 +788,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError('table 与 id 都必填'))
         if not confirmed:
             return Err(SdkError('永久删除需要二次确认'))
+        # 显式传 null 等同于没传：一律落到默认库，禁止退化成“遍历所有库”误删同 id 条目
+        character = '' if character is None else str(character)
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         try:
@@ -806,7 +811,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 result = await asyncio.to_thread(
                     engine.delete_permanent, table, id)
             except Exception as exc:
-                # 单个库打不开不影响继续找其他库；失败只记账，不中止
+                # 目标库只有这一个：打不开只记账并给出明确错误，不静默当成“没这条”
                 failures.append(os.path.basename(path))
                 self.logger.warning('永久删除失败(%s): %s', os.path.basename(path), exc)
                 continue
@@ -848,7 +853,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 'id': {'type': 'integer', 'description': '工作记忆条目 id'},
                 'character': {
                     'type': 'string',
-                    'description': '条目所属角色库，空串表示默认库（不传 null 才遍历所有库）',
+                    'description': '条目所属角色库；空串或不传表示默认库，不会遍历所有库',
                 },
                 'confirmed': {'type': 'boolean'},
             },
@@ -866,6 +871,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError('id 必填：请传入面板上的工作记忆条目 id'))
         if not confirmed:
             return Err(SdkError('永久删除需要二次确认'))
+        # 显式传 null 等同于没传：wm.id 每库自增，跨库遍历会删到别的角色库同 id 的行
+        character = '' if character is None else str(character)
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         failures: list[str] = []
@@ -1102,6 +1109,17 @@ class TemporalMemoryPlugin(NekoPluginBase):
         self._maintenance_errors.pop(character, None)
         return result if isinstance(result, dict) else None
 
+    def _working_window(self) -> int:
+        """工作记忆行数，跟随设置（引擎写入与面板展示用同一个数）。"""
+        value = self._settings.get('working_window', 8)
+        if value is None:
+            value = 8
+        try:
+            window = int(value)
+        except (TypeError, ValueError):
+            return 8
+        return max(0, min(window, 50))
+
     def _character(self, kwargs: dict | None = None) -> str:
         """取角色名：优先宿主作用域 `ctx.current_lanlan`，再认宿主注入的 `_ctx`。"""
         ctx = getattr(self, 'ctx', None)
@@ -1285,15 +1303,16 @@ class TemporalMemoryPlugin(NekoPluginBase):
         self._unloaded_cache = (now, result)
         return [dict(item) for item in result]
 
-    def _delete_candidates(self, character: str | None,
+    def _delete_candidates(self, character: str,
                            loaded: dict[str, Any]) -> list[str]:
-        """单个角色只查它的库；没指定角色时按「已加载优先」把所有库排一遍。"""
-        if character is not None:
-            target = os.path.abspath(self._db_path(character))
-            return [target] if target in loaded or os.path.exists(target) else []
-        candidates = self._db_file_paths()
-        candidates.sort(key=lambda path: (path not in loaded, path))
-        return candidates
+        """只查这个角色对应的库；空串是默认库。绝不返回“所有库”的列表。
+
+        历史入口曾用 None 表示“没指定角色”，而 null 会退化成遍历所有库：
+        wm.id 与记忆 id 都是每库自增，遍历就会删到别的角色库里的同 id 行。
+        现在两个入口都先把 None 归一化成空串，本函数只接受字符串。
+        """
+        target = os.path.abspath(self._db_path(character))
+        return [target] if target in loaded or os.path.exists(target) else []
 
     def _migrate_legacy_role_db(self, character: str, target: str) -> None:
         legacy = self._legacy_db_path(character)

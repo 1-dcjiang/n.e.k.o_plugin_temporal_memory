@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.15
+
+A1351 安全性与记忆影响（对 0.5.14 的静态复读，覆盖约四成代码、未跑测试）结论是「能发、无阻断项」：上架审查三处已落实、空串删错库已修、安全面无新增风险。新挑出的四处轻项全部核实成立，逐条收口：
+
+- 面板工作记忆跟随 `working_window`：`_settings_snapshot` 不再写死 `recent_turns(8)`，新增 `_working_window()`（读设置、`None` 按 8、坏值回 8、夹在 0–50），面板也去掉 `slice(0, 40)`。窗口调大后多出来的行能看到、能单独永久删除；窗口为 0 时面板如实显示 0 行，不再被 `or 8` 悄悄改成 8。
+- 启动维护看总开关：`on_startup` 的逐库 `maintenance` 包进 `if self._settings.get('enabled', True)`，与 `on_maintenance_timer` 同一口径；总开关关闭时不再做沉降/分层空转，但引擎挂载与状态上报照常。
+- 「一起删除」弹窗先给预览：工作记忆命中按文本相似匹配（`quote_matches`，短于 4 字不匹配），可能命中相近但不是同一条的行。面板把待删行拼成「角色 ｜ 时间 ／ 原文（截 60 字）」，最多 8 行，放在 `ui.confirm.working_hits_message` 之后；两个 locale 新增 `ui.confirm.working_hits_line`，并在 message 里注明“按文本相似匹配，可能命中相近的行”。
+- `character` 显式传 `null` 只落默认库：`delete_memory` 与 `delete_working_turn` 先做 `'' if character is None else str(character)`，`_delete_candidates` 改成只接受字符串、删掉「没指定角色就把所有库排一遍」的分支并注明历史语义。记忆 id 与 `wm.id` 都是每库自增，遍历会删到别的角色库同 id 的行；两个入口的 `input_schema` 描述同步改成“空串或不传表示默认库，不会遍历所有库”。
+- 行为变化（口径收紧）：目标库打不开时 `delete_memory` 回 `Err('有 1 个记忆库打不开…')`，不再继续翻其他库；原用例 `test_delete_memory_skips_unreadable_database` 按新口径改写为“报明确错误且不碰其他库”。
+- 测试新增 10 项（`tests/test_working_window_review.py`）：窗口跟随/默认 8/边界夹取、启动开关两态、两个删除入口 null 语义、候选池不返回全库、两 locale 有 preview 行键、面板弹窗拼接 preview。
+- 版本 0.5.15，测试数 215 项（214 passed + 1 skipped）/ 209 个 `def test_`。
+
 ## 0.5.14
 
 A1348 上架审查（纯静态、覆盖约四成代码）的三条必改项，结论是「改完再上」：

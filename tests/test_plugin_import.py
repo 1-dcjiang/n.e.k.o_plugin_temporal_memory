@@ -541,7 +541,7 @@ def test_delete_memory_permanent_requires_confirmation(tmp_path):
         table='anchors', id=item['id'], confirmed=False))
     assert rejected.ok is False
     accepted = asyncio.run(plugin.delete_memory(
-        table='anchors', id=item['id'], confirmed=True))
+        table='anchors', id=item['id'], character='猫娘', confirmed=True))
     assert accepted.ok is True
     assert engine.store.get_memory('anchors', item['id']) is None
 
@@ -640,8 +640,8 @@ def test_remember_when_disabled_creates_no_database(tmp_path):
     assert not plugin._engines
 
 
-def test_delete_memory_skips_unreadable_database(tmp_path):
-    """一个库打不开不能中止整个查找，后面的库仍要删除成功。"""
+def test_delete_memory_reports_unreadable_database(tmp_path):
+    """目标库打不开要回明确错误，且不碰其他库（0.5.15 起不再遍历所有库）。"""
     from temporal_memory.engine import MemoryEngine
     plugin = _make_plugin(tmp_path)
     good = plugin._db_path('bbb')
@@ -652,9 +652,10 @@ def test_delete_memory_skips_unreadable_database(tmp_path):
     with open(broken, 'wb') as fh:
         fh.write(b'not a sqlite database')
     result = asyncio.run(plugin.delete_memory(
-        table='anchors', id=item['id'], confirmed=True))
-    assert result.ok is True
-    assert result.value['failed_databases']
+        table='anchors', id=item['id'], character='aaa', confirmed=True))
+    assert result.ok is False
+    assert '打不开' in str(result.error)
+    assert MemoryEngine(good).store.get_memory('anchors', item['id']) is not None
 
 
 def test_clear_memories_surfaces_partial_failure(tmp_path):
