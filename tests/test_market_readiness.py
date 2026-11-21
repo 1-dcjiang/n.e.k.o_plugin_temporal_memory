@@ -159,6 +159,20 @@ def test_readme_states_usage_caveats():
         assert token in readme, token
     for token in ('模型主动调用', '原话证据由模型提交', '对话明文落本地'):
         assert token in readme, token
+    assert '## 对记忆的影响（上架说明）' in readme
+    for token in ('会写什么', '不会做什么', '删除做到哪一步', '覆盖与准确性'):
+        assert token in readme, token
+
+
+def test_plugin_toml_states_memory_impact():
+    text = (ROOT / 'plugin.toml').read_text(encoding='utf-8')
+    description = text.split('description = "', 1)[1].split('"', 1)[0]
+    short = text.split('short_description = "', 1)[1].split('"', 1)[0]
+    assert description.startswith('对记忆的影响：')
+    for token in ('明文', '删除', '不自动注入', '覆盖率不保证'):
+        assert token in description, token
+    for token in ('本机记忆', '明文', '删除'):
+        assert token in short, token
 
 
 def test_plugin_toml_description_states_usage_caveats():

@@ -320,3 +320,10 @@
 - 唯一词验证：`tests/test_delete_residue.py` 写 `zq7x9k` 删除后扫 `.db` / `-wal` 字节；对照组不配 secure-delete 的普通 FTS5 删同一词仍可搜到。
 - 文档：README 存储段与 guide 边界说明同步新行为，保留导出/备份/快照明文边界。
 - 版本 0.5.18，测试数 234 项（233 passed + 1 skipped）/ 228 个 `def test_`。
+
+## 35. 上架市场与记忆影响声明（0.5.19）
+
+- 描述前置：`plugin.toml` 与 `i18n` 中英 `description` 以「对记忆的影响 / Memory impact」开头，写明明文落本地、按角色分库、不上传、不自动注入；删除清页/FTS/WAL，导出与备份仍明文；`observe` 覆盖率不保证。
+- 短描述同步「会写入本机记忆」；README 新增「对记忆的影响（上架说明）」五段。
+- 测试：`test_market_readiness.py` 锁定 README 影响段与 `plugin.toml` 影响声明。
+- 流程：构建 0.5.19 → GitHub Release → `neko-plugin publish market <release-url>`。
