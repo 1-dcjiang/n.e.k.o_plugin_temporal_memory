@@ -112,7 +112,8 @@ class MemoryEngine:
         # 偏好/事实即使没达到锚点阈值，也要留下可核对的证据；否则「我喜欢猫」永远进不来。
         semantics = self._ingest_semantics(
             user_text, tags=result.tags, ts=ts, source_event_id=source_event_id,
-            attach_anchor_id=anchor.get('id') if anchor else None)
+            attach_anchor_id=anchor.get('id') if anchor else None,
+            verify_against=user_text)
         payload['semantics'] = semantics
         return payload
 
@@ -143,6 +144,10 @@ class MemoryEngine:
         ts = int(time.time()) if ts is None else int(ts)
         tag_list = sorted({*(tags or ()), *scoring.extract_tags(text)})
         kind = scoring.classify_memory(text)
+        verified = self._verify_against_working_memory(text)
+        # 工作记忆里有用户原话但对不上 → 多半是模型转述而非原话，降级待确认；
+        # 工作记忆为空时无从比对（null），维持原行为，不制造无谓的待确认。
+        status = 'pending' if verified is False else 'active'
         anchor = self.store.add_anchor(
             summary=scoring.summarize(text, max_chars=int(self.settings['max_anchor_summary_chars'])),
             ts=ts,
@@ -156,11 +161,19 @@ class MemoryEngine:
             source_kind='manual',
             kind=kind,
             score=1.0,
+            status=status,
         )
-        return {'anchor': anchor, 'kind': kind,
-                'semantics': self._ingest_semantics(
-                    text, tags=tag_list, ts=ts, source_event_id=source_event_id,
-                    attach_anchor_id=anchor['id'], source_kind='manual')}
+        result = {'anchor': anchor, 'kind': kind, 'quote_verified': verified,
+                  'semantics': self._ingest_semantics(
+                      text, tags=tag_list, ts=ts, source_event_id=source_event_id,
+                      attach_anchor_id=anchor['id'], source_kind='manual',
+                      verify_against=text)}
+        if verified is False:
+            result['status'] = 'pending'
+            result['reason'] = 'quote_not_in_working_memory'
+            result['note'] = ('最近的工作记忆里没有这句用户原话，已放进「未分组待确认」：'
+                              '核对后点「保留这条」才会进入召回。')
+        return result
 
     def _create_anchor(self, user_text: str, assistant_text: str,
                        score: scoring.ScoreResult, *, ts: int,
@@ -185,15 +198,34 @@ class MemoryEngine:
             score=score.score,
         )
 
+    def _verify_against_working_memory(self, text: str) -> bool | None:
+        """拿最近工作记忆里的用户发言核对这句话是不是用户原话。
+
+        返回 None 表示没有对照样本（工作记忆还是空的），调用方应维持原行为。
+        """
+        keep = max(8, int(self.settings.get('working_window') or 8))
+        lines = [turn['content'] for turn in self.store.recent_turns(keep)
+                 if turn.get('role') in ('用户', 'user') and turn.get('content')]
+        if not lines:
+            return None
+        fragments = scoring.extract_memory_fragments(text, limit=4, min_chars=4)
+        candidates = [fragment['content'] for fragment in fragments] or [text]
+        return any(scoring.quote_matches(candidate, line)
+                   for candidate in candidates for line in lines)
+
     def _ingest_semantics(self, text: str, *, tags: list[str], ts: int,
                           source_event_id: str, attach_anchor_id: str | None,
-                          source_kind: str = 'chat_turn') -> list[dict[str, Any]]:
+                          source_kind: str = 'chat_turn',
+                          verify_against: str = '') -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for fragment in scoring.extract_memory_fragments(text):
+            verified = (True if not verify_against
+                        else scoring.quote_matches(fragment['quote'], verify_against))
             item = self._add_or_confirm_semantic(
                 fragment['content'], quote=fragment['quote'], kind=fragment['kind'],
                 tags=tags, ts=ts, source_event_id=source_event_id,
-                attach_anchor_id=attach_anchor_id, source_kind=source_kind)
+                attach_anchor_id=attach_anchor_id, source_kind=source_kind,
+                verified=verified)
             if item:
                 out.append(item)
         return out
@@ -201,7 +233,17 @@ class MemoryEngine:
     def _add_or_confirm_semantic(self, content: str, *, quote: str, kind: str,
                                   tags: list[str], ts: int, source_event_id: str,
                                   attach_anchor_id: str | None,
-                                  source_kind: str) -> dict[str, Any]:
+                                  source_kind: str, verified: bool = True) -> dict[str, Any]:
+        if not verified:
+            # 摘出来的证据在原话里找不到：不参与确认/冲突判定，直接落未分组待确认，
+            # 由用户核对后保留或归档，避免污染同一事实的确认计数。
+            item = self.store.add_semantic(
+                content, tags=tags, attach_anchor_id=attach_anchor_id, quote=quote,
+                source_event_id=source_event_id, source_kind=source_kind,
+                kind=kind, status='pending', score=0.5)
+            self.store.link_event_semantic(source_event_id, source_kind, item['id'])
+            return {**item, 'quote_verified': False, 'status': 'pending',
+                    'reason': 'quote_not_in_source'}
         candidates = self.store.recent_semantics(kind=kind)
         for old in candidates:
             if old.get('status') in {'pending', 'archived'}:

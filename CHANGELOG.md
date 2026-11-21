@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.13
+
+按「不加列、不改启动架构」的思路处理上轮遗留的边界项：
+
+- 未加载的角色库可见：新增只读探针（`mode=ro` 打开、读完就关、30 秒缓存），面板列出磁盘上没挂载的库的角色名、锚点/偏好条数、待确认数、工作记忆行数与最后写入时间；新增 `attach_database` 入口 + 面板「载入这个库」，按需把库挂到当前列表，启动仍然不全量挂载。
+- 导出覆盖全部角色库：`export_memories` 不再只遍历已加载引擎，未加载库临时打开导出后关闭（与清空同一做法）；打不开的库记入 `failed_databases` 并在提示里列出，返回里多一个 `databases`。
+- 原话核对（不靠关联字段）：`observe` 摘出的每句证据必须能在本轮 `user_text` 里找到，`remember` 拿最近工作记忆里的用户发言比对（去标点包含 + 二元组相似度兜住「记住，…」这类前后缀）。对不上降级为「未分组待确认」并标 `quote_verified=false`；工作记忆为空时无从比对，`quote_verified=null` 维持原行为。
+- 删除联动工作记忆：`delete_memory` 删成功后按 `quote` 字面匹配工作记忆，返回 `working_memory_hits`；面板追问「要一起删吗」，选「一起删除」才逐行调用 `delete_working_turn`，不选就原样保留。
+- 待确认不会烂在角落：状态栏显示待确认条数，有条目超过 7 天未处理时额外提醒并给出最早一条等了多久（`pending_alert_days` / `pending_overdue` / `pending_oldest_days`）。
+- 单条删除不再需要 VACUUM：sqlite 连接开启 `PRAGMA secure_delete=ON`，删掉的字节直接零覆盖；「清空全部」仍做 checkpoint + VACUUM 回收文件。
+- 文档：guide 补未加载库列表、导出覆盖范围、原话核对口径、待确认提醒与 `secure_delete`；删除「单条删除文件里残留正文页」的旧限制。
+- 版本 0.5.13，测试数 194 项 / 190 个 `def test_`。
+
 ## 0.5.12
 
 A1343 安全性与记忆影响（对 0.5.11 的静态复核）收尾：

@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
 from plugin.sdk.plugin import (
@@ -41,6 +42,8 @@ TAG_RE = re.compile(r'[0-9A-Za-z_\-\u4e00-\u9fff]{1,16}')
 _TS_FLOOR = 10 * 365 * 86400
 WRITE_LIMIT = 30
 WRITE_WINDOW_SECONDS = 60
+PENDING_ALERT_DAYS = 7
+UNLOADED_PROBE_TTL = 30
 
 
 def _clamp_ts(value: Any) -> int | None:
@@ -95,6 +98,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         self._init_lock = asyncio.Lock()
         self._write_times: dict[str, list[float]] = {}
         self._engine_errors: dict[str, str] = {}
+        self._unloaded_cache: tuple[float, list[dict[str, Any]]] | None = None
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -406,6 +410,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 conflict_groups.add(key)
             visible_conflicts.append(item)
         orphans.sort(key=lambda item: int(item.get('ts') or 0))
+        now = int(time.time())
+        overdue_after = PENDING_ALERT_DAYS * 86400
+        waiting = [now - int(item.get('ts') or 0)
+                   for item in (*visible_conflicts, *orphans)
+                   if now - int(item.get('ts') or 0) > overdue_after]
+        unloaded = self._unloaded_databases()
         return {
             'config': dict(self._settings),
             'status': {'ready': self._ready, 'stats': self._aggregate_stats(),
@@ -420,6 +430,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
             'conflicts_truncated': conflict_truncated,
             'orphan_pending': orphans[:120],
             'orphan_pending_truncated': orphan_truncated or len(orphans) > 120,
+            'pending_alert_days': PENDING_ALERT_DAYS,
+            'pending_overdue': len(waiting),
+            'pending_oldest_days': round(max(waiting) / 86400, 1) if waiting else 0,
+            'unloaded_databases': unloaded,
         }
 
     @ui.action(label='保存设置', tone='primary', refresh_context=True)
@@ -684,9 +698,32 @@ class TemporalMemoryPlugin(NekoPluginBase):
                                    'anchors': [], 'semantics': [],
                                    'working_memory': []}
         truncated = {'anchors': False, 'semantics': False, 'total': False}
+        failures: list[str] = []
+        databases = 0
+        loaded = {os.path.abspath(engine.store.db_path): engine
+                  for engine in self._engines.values()}
         try:
-            for character, engine in self._engines.items():
-                one = await asyncio.to_thread(engine.export)
+            # 未挂载的角色库也导出：临时打开、读完就关，跟清空一样按需处理，
+            # 否则用户会以为导出的就是全部，其实漏了没加载的角色。
+            for path in self._db_file_paths():
+                engine = loaded.get(path)
+                opened = None
+                try:
+                    if engine is None:
+                        opened = await asyncio.to_thread(
+                            MemoryEngine, path, dict(self._settings))
+                        engine = opened
+                    one = await asyncio.to_thread(engine.export)
+                    character = engine.store.get_owner() or ''
+                except Exception as exc:
+                    failures.append(os.path.basename(path))
+                    self.logger.warning('导出时读取记忆库失败(%s): %s',
+                                        os.path.basename(path), exc)
+                    continue
+                finally:
+                    if opened is not None:
+                        await asyncio.to_thread(opened.store.close)
+                databases += 1
                 payload['exported_at'] = max(payload['exported_at'], one['exported_at'])
                 one_truncated = one.get('truncated') or {}
                 for table in ('anchors', 'semantics'):
@@ -709,7 +746,13 @@ class TemporalMemoryPlugin(NekoPluginBase):
         except Exception as exc:
             self.logger.warning('导出记忆失败: %s', exc)
             return Err(SdkError('导出失败，请稍后重试'))
+        payload['databases'] = databases
         payload['truncated'] = truncated
+        if failures:
+            payload['failed_databases'] = failures
+            payload['warning_failed'] = (
+                f'有 {len(failures)} 个记忆库打不开，导出里不含它们的条目：'
+                + '、'.join(failures))
         if any(truncated.values()):
             payload['warning'] = (
                 f'导出超过上限只保留部分条目（单表 {MAX_EXPORT_ROWS_PER_TABLE} 条、'
@@ -757,6 +800,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
                     opened = await asyncio.to_thread(
                         MemoryEngine, path, dict(self._settings))
                     engine = opened
+                before = await asyncio.to_thread(engine.store.get_memory, table, id)
+                owner = await asyncio.to_thread(engine.store.get_owner)
                 result = await asyncio.to_thread(
                     engine.delete_permanent, table, id)
             except Exception as exc:
@@ -769,6 +814,19 @@ class TemporalMemoryPlugin(NekoPluginBase):
                     await asyncio.to_thread(opened.store.close)
             if result.get('ok'):
                 payload = dict(result)
+                payload['working_memory_hits'] = []
+                if before:
+                    # 工作记忆里可能还留着同一句原话：删记忆不等于删原话，先提示再让用户决定
+                    quote = str(before.get('quote') or before.get('summary')
+                                or before.get('content') or '')
+                    try:
+                        hits = await asyncio.to_thread(
+                            engine.store.workmem_hits, quote)
+                        payload['working_memory_hits'] = [
+                            {**hit, 'character': owner}
+                            for hit in hits]
+                    except Exception as exc:
+                        self.logger.warning('查工作记忆联动提示失败: %s', exc)
                 if failures:
                     payload['failed_databases'] = failures
                 return Ok(payload)
@@ -836,6 +894,46 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 f'有 {len(failures)} 个记忆库打不开，已跳过；其余库没有这条工作记忆'))
         return Err(SdkError('没有找到这条工作记忆'))
 
+    @ui.action(label='载入角色库', refresh_context=True)
+    @plugin_entry(
+        id='attach_database',
+        name='载入角色库',
+        description=(
+            '把面板「未加载角色库」里的库挂到当前记忆列表，按需读取；'
+            '不改变启动时的加载行为，也不全量挂载磁盘上的所有库。'
+        ),
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': '面板列表里的库文件完整路径'},
+            },
+            'required': ['path'],
+        },
+        metadata={'agent_hidden': True},
+    )
+    async def attach_database(self, path: str = '', **_):
+        target = os.path.abspath(path or '')
+        if not target:
+            return Err(SdkError('path 必填：请传入面板列表里的库文件路径'))
+        if target not in {os.path.abspath(item) for item in self._db_file_paths()}:
+            return Err(SdkError('只能载入本插件数据目录里列出的记忆库'))
+        if any(os.path.abspath(engine.store.db_path) == target
+               for engine in self._engines.values()):
+            return Ok({'ok': True, 'already_loaded': True, 'path': target})
+        character = self._db_owner(target)
+        if not character:
+            return Err(SdkError(
+                '这个库里没有角色标记，无法挂载；可以先用「导出 JSON」核对内容'))
+        if os.path.abspath(self._db_path(character)) != target:
+            return Err(SdkError(
+                '这个库的文件名和角色对不上（可能是 0.4.9 的旧命名），'
+                '先启动一次让插件按角色迁移，再从这里载入'))
+        engine = await self._ensure_engine(character)
+        if engine is None:
+            return Err(SdkError(self._engine_error(character)))
+        self._unloaded_cache = None
+        return Ok({'ok': True, 'path': target, 'character': character})
+
     @ui.action(label='清空全部记忆', tone='danger', refresh_context=True)
     @plugin_entry(
         id='clear_memories',
@@ -881,6 +979,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         total['backup_files'] = 0
         if total['ok']:
             total['backup_files'] = self._remove_migration_backups()
+        self._unloaded_cache = None
         return Ok(total)
 
     def _remove_migration_backups(self) -> int:
@@ -1106,6 +1205,65 @@ class TemporalMemoryPlugin(NekoPluginBase):
             if name.startswith('memory-') and name.endswith('.db'):
                 paths.add(os.path.abspath(os.path.join(parent, name)))
         return sorted(paths)
+
+    def _probe_database(self, path: str) -> dict[str, Any]:
+        """只读探针：不建 MemoryEngine、不跑 initialize，读完就关。
+
+        只为让面板看见「没有挂载的角色库」，所以用 mode=ro 打开，绝不触发
+        迁移或建索引这类写操作；库里表结构不认识时如实回报 ok=False。
+        """
+        info: dict[str, Any] = {'path': path, 'name': os.path.basename(path),
+                                'character': '', 'anchors': 0, 'semantics': 0,
+                                'pending': 0, 'conflict_groups': 0,
+                                'working_turns': 0, 'last_activity': 0, 'ok': True}
+        try:
+            uri = Path(path).resolve().as_uri() + '?mode=ro'
+            conn = sqlite3.connect(uri, uri=True, timeout=2)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            info['ok'] = False
+            info['error'] = str(exc)[:80]
+            return info
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT v FROM meta WHERE k='character'").fetchone()
+            if row:
+                info['character'] = str(row[0])
+            info['anchors'] = int(conn.execute(
+                'SELECT COUNT(*) FROM anchors').fetchone()[0])
+            info['semantics'] = int(conn.execute(
+                'SELECT COUNT(*) FROM semantics').fetchone()[0])
+            info['pending'] = int(conn.execute(
+                'SELECT COUNT(*) FROM ('
+                'SELECT status FROM anchors UNION ALL SELECT status FROM semantics'
+                ") WHERE status='pending'").fetchone()[0])
+            info['conflict_groups'] = int(conn.execute(
+                'SELECT COUNT(DISTINCT conflict_group) AS n FROM ('
+                "SELECT conflict_group FROM anchors WHERE status='pending' "
+                "AND conflict_group!='' UNION ALL "
+                "SELECT conflict_group FROM semantics WHERE status='pending' "
+                "AND conflict_group!='')").fetchone()[0])
+            info['working_turns'] = int(conn.execute(
+                'SELECT COUNT(*) FROM wm').fetchone()[0])
+            info['last_activity'] = int(conn.execute(
+                'SELECT MAX(created_at) FROM anchors').fetchone()[0] or 0)
+        except (sqlite3.Error, ValueError) as exc:
+            info['ok'] = False
+            info['error'] = str(exc)[:80]
+        finally:
+            conn.close()
+        return info
+
+    def _unloaded_databases(self) -> list[dict[str, Any]]:
+        """磁盘上存在但没挂载的库：只读快照，带 30 秒缓存防止面板刷新反复打开。"""
+        now = time.monotonic()
+        if self._unloaded_cache and now - self._unloaded_cache[0] < UNLOADED_PROBE_TTL:
+            return [dict(item) for item in self._unloaded_cache[1]]
+        loaded = {os.path.abspath(engine.store.db_path)
+                  for engine in self._engines.values()}
+        result = [self._probe_database(path) for path in self._db_file_paths()
+                  if path not in loaded]
+        self._unloaded_cache = (now, result)
+        return [dict(item) for item in result]
 
     def _delete_candidates(self, character: str | None,
                            loaded: dict[str, Any]) -> list[str]:

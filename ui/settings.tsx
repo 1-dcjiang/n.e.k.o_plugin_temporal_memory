@@ -56,6 +56,20 @@ type WorkingTurn = {
   character?: string
 }
 
+type UnloadedDatabase = {
+  path: string
+  name?: string
+  character?: string
+  anchors?: number
+  semantics?: number
+  pending?: number
+  conflict_groups?: number
+  working_turns?: number
+  last_activity?: number
+  ok?: boolean
+  error?: string
+}
+
 type MemoryState = {
   config?: Partial<MemoryConfig>
   capacity?: { per_role?: number; max_engines?: number }
@@ -68,6 +82,10 @@ type MemoryState = {
   orphan_pending?: MemoryItem[]
   orphan_pending_truncated?: boolean
   working_memory?: WorkingTurn[]
+  unloaded_databases?: UnloadedDatabase[]
+  pending_alert_days?: number
+  pending_overdue?: number
+  pending_oldest_days?: number
   status?: {
     ready?: boolean
     legacy_ignored?: boolean
@@ -147,6 +165,10 @@ export default function TemporalMemorySettings(
   const orphanPending = props.state?.orphan_pending || []
   const orphanPendingTruncated = Boolean(props.state?.orphan_pending_truncated)
   const workingMemory = props.state?.working_memory || []
+  const unloaded = props.state?.unloaded_databases || []
+  const pendingAlertDays = Number(props.state?.pending_alert_days ?? 7) || 7
+  const pendingOverdue = Number(props.state?.pending_overdue ?? 0) || 0
+  const pendingOldestDays = Number(props.state?.pending_oldest_days ?? 0) || 0
   const workingWindow = Number(config.working_window ?? 8) || 8
 
   const [enabled, setEnabled] = props.useLocalState(
@@ -294,7 +316,37 @@ export default function TemporalMemorySettings(
       confirmed: true,
     }
     if (item.character !== undefined) payload.character = item.character
-    await act("delete_memory", payload, "永久删除")
+    const result = await act("delete_memory", payload, "永久删除")
+    const hits = (result?.working_memory_hits ?? []) as WorkingTurn[]
+    if (!hits || hits.length === 0) return
+    const alsoDelete = await confirm({
+      title: "工作记忆里还有这句原话",
+      message: `删除记忆条不会删原话：工作记忆里还有 ${hits.length} 行含这句。要一起永久删除这些行吗？`,
+      tone: "danger",
+      confirmLabel: "一起删除",
+      cancelLabel: "先留着",
+    })
+    if (!alsoDelete) {
+      setNotice(
+        `记忆条已删除；工作记忆里还有 ${hits.length} 行含这句原话，可在「工作记忆」里单独删除。`,
+      )
+      return
+    }
+    let removed = 0
+    for (const hit of hits) {
+      try {
+        await props.api.call("delete_working_turn", {
+          id: hit.id ?? 0,
+          character: hit.character ?? "",
+          confirmed: true,
+        })
+        removed += 1
+      } catch {
+        // 单行删失败不影响其余行；最后统一提示成功数
+      }
+    }
+    setNotice(`记忆条已删除，并一并删掉 ${removed} / ${hits.length} 行工作记忆。`)
+    await props.api.refresh()
   }
 
   async function clearAll() {
@@ -367,6 +419,13 @@ export default function TemporalMemorySettings(
                 {statuses.active ?? 0} / {statuses.dormant ?? 0} / {statuses.pending ?? 0} / {statuses.archived ?? 0}
               </Text>
             </Inline>
+            {(statuses.pending ?? 0) > 0 && (
+              <Alert tone="warning">
+                {pendingOverdue > 0
+                  ? `有 ${pendingOverdue} 条待确认已经等了超过 ${pendingAlertDays} 天（最早一条 ${pendingOldestDays} 天），处理前两边说法都不会进入召回，建议尽快在下面选一条。`
+                  : `还有 ${statuses.pending} 条待确认，处理前这些说法不会进入召回。`}
+              </Alert>
+            )}
             <Inline align="center" justify="space-between">
               <Text>单库最高占用（有效 + 待确认）</Text>
               <Text>{stats.max_role_used ?? 0} / {capacity.per_role ?? 5000}</Text>
@@ -394,6 +453,46 @@ export default function TemporalMemorySettings(
             </Alert>
           </Stack>
         </Card>
+
+        {unloaded.length > 0 && (
+          <Card title="未加载的角色库">
+            <Stack>
+              <Alert tone="info">
+                {`磁盘上还有 ${unloaded.length} 个库没有挂载：它们不参与召回，也不在上面列表里。下面只是只读快照（最多 30 秒延迟），不会改动文件；要处理里面的条目就点「载入这个库」。`}
+              </Alert>
+              {unloaded.map((db) => (
+                <Card
+                  key={db.path}
+                  title={`${db.character || "（库里没有角色标记）"}｜${db.name || ""}`}
+                >
+                  <Stack>
+                    <Text>
+                      {`锚点 ${db.anchors ?? 0}｜偏好/事实 ${db.semantics ?? 0}｜待确认 ${db.pending ?? 0}（${db.conflict_groups ?? 0} 组冲突）｜工作记忆 ${db.working_turns ?? 0} 行`}
+                    </Text>
+                    <Text>
+                      {db.ok === false
+                        ? `读取失败：${db.error || "未知原因"}`
+                        : db.last_activity
+                          ? `最后写入：${new Date(db.last_activity * 1000).toLocaleString()}`
+                          : "这个库还没有锚点"}
+                    </Text>
+                    <Inline align="center" justify="space-between">
+                      <Text>{`文件 ${db.name || ""}`}</Text>
+                      {db.ok !== false && (
+                        <Button
+                          tone="default"
+                          onClick={() => act("attach_database", { path: db.path }, "载入角色库")}
+                        >
+                          载入这个库
+                        </Button>
+                      )}
+                    </Inline>
+                  </Stack>
+                </Card>
+              ))}
+            </Stack>
+          </Card>
+        )}
 
         {conflictGroups.length > 0 && (
           <Card title="待确认矛盾">

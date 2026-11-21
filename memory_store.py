@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .scoring import DOMAIN_TERMS
+from .scoring import DOMAIN_TERMS, quote_matches
 
 _LOG = logging.getLogger(__name__)
 
@@ -254,6 +254,9 @@ class MemoryStore:
             conn.execute('PRAGMA journal_mode=WAL')
             self._wal_mode_set = True
         conn.execute('PRAGMA synchronous=NORMAL')
+        # 删掉的字节直接零覆盖，省掉「单条删除后必须 VACUUM 才安心」的负担；
+        # 代价是释放页要多写一遍，用户量级（每库几千行）可以接受。
+        conn.execute('PRAGMA secure_delete=ON')
         return conn
 
     @contextmanager
@@ -534,6 +537,28 @@ class MemoryStore:
             conn.execute('DELETE FROM wm WHERE id=?', (turn_id,))
             self._commit(conn)
         return True
+
+    def workmem_hits(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
+        """按字面匹配工作记忆里含这段原话的行，供删除联动提示。
+
+        只做提示不做删除：工作记忆行和记忆条没有关联字段，靠文本比对是唯一
+        不建新列的做法，所以宁可少报（短于 4 字不匹配）也不错删。
+        """
+        needle = (text or '').strip()
+        if len(needle) < 4:
+            return []
+        with self._lock, self._session() as conn:
+            rows = conn.execute(
+                'SELECT id, ts, role, content FROM wm ORDER BY id DESC').fetchall()
+        hits: list[dict[str, Any]] = []
+        for row in rows:
+            if not quote_matches(needle, row['content']):
+                continue
+            hits.append({'id': int(row['id']), 'ts': int(row['ts'] or 0),
+                         'role': row['role'], 'preview': (row['content'] or '')[:80]})
+            if len(hits) >= max(1, int(limit)):
+                break
+        return hits
 
     # ---------------------------------------------------------------- 锚点链
 

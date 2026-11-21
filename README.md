@@ -13,13 +13,13 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.5.12 修掉 A1343 复核指认的问题（工作记忆删除的空串语义、清空回收失败回报、清理逐库容错、固定旧条不再堆孤儿、维护定时器跟随总开关）；181 项测试（pytest 收集，含参数化；文件内 177 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
+> 当前状态：v0.5.13 把上轮遗留的边界项按需化（未加载角色库只读可见并可载入、导出覆盖全部库、原话核对降级待确认、删除联动提示工作记忆、待确认逾期提醒、`secure_delete` 零覆盖）；194 项测试（pytest 收集，含参数化；文件内 190 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
 
 ## 目录
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.5.12）
+├── plugin.toml            # 插件元信息与配置项（v0.5.13）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
@@ -57,6 +57,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 | `resolve_conflict` | 设置页 | 用户处理矛盾 | 保留一条、其余归档 |
 | `undo_last` / `export_memories` | 设置页 | 撤销或导出 | 撤销最近一次面板动作 / JSON |
 | `delete_memory` / `clear_memories` | 设置页 | 单条永久删除或清空全部 | `agent_hidden`，需 `confirmed` |
+| `delete_working_turn` / `attach_database` | 设置页 | 删除一条工作记忆原文 / 载入未挂载的角色库 | `agent_hidden`，需 `confirmed`（载入不需要） |
 
 ## 注入方式（v0.4）
 
@@ -104,6 +105,9 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 - 工作记忆卡片直接展示每个角色最近 8 行用户/助手原文（两行约一轮，8 行≈4 轮对话），每条可单独永久删除，并提示明文存储与模型传入。
 - 单条可「永久删除」，不必等 30 天清理；「清空全部记忆」两次确认后清空数据目录里的所有角色库，包括当前没加载的库。
 - 已移除条目单独列出，最多最近 120 条，可直接永久删除；总开关关闭后写入和召回都停用。
+- 「未加载的角色库」只读列出磁盘上没挂载的库（角色名、条数、待确认、工作记忆行数、最后写入时间），点「载入这个库」才把该库挂进列表；启动时不会全量挂载。
+- 删掉一条记忆后，若工作记忆里还留着同一句原话，会再问一次「要不要一起删」，不选就原样保留。
+- 状态栏显示待确认条数，超过 7 天没处理会额外提醒（含最早一条等了多久）。
 
 ## 数据模型
 
@@ -117,7 +121,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 | `revisions` | 撤销台账 | `action, before_json, after_json, undone` |
 | `meta` | 链表头尾指针 + 轮次计数 | `head` / `tail` / `turn_no` |
 
-存储位置：插件私有数据目录，按角色分库为 `memory-<角色>-<sha256前8位>.db`；取不到角色名时沿用唯一已有的角色库，没有才用 `memory.db`，WAL 模式。老库启动时自动补列、回填 `quote=summary`，不会删数据；0.4.9 的 `memory-<角色>.db` 会在首次访问时迁到新哈希名。
+存储位置：插件私有数据目录，按角色分库为 `memory-<角色>-<sha256前8位>.db`；取不到角色名时沿用唯一已有的角色库，没有才用 `memory.db`，WAL 模式。老库启动时自动补列、回填 `quote=summary`，不会删数据；0.4.9 的 `memory-<角色>.db` 会在首次访问时迁到新哈希名。连接统一开 `PRAGMA secure_delete=ON`，删除的内容被零覆盖，单条删除不需要 VACUUM；只有「清空全部」会 checkpoint + VACUUM 回收文件。
 
 ## 配置
 

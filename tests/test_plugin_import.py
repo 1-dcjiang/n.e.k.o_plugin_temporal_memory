@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from temporal_memory import TemporalMemoryPlugin
 
@@ -30,7 +31,8 @@ def test_package_imports_with_fake_sdk():
     assert issubclass(TemporalMemoryPlugin, object)
     for name in ('observe', 'remember', 'recall', 'timeline', 'recall_tool',
                  'confirm_memory', 'pin_memory', 'correct_memory', 'archive_memory',
-                 'resolve_conflict', 'resolve_orphan', 'undo_last',
+                 'resolve_conflict', 'resolve_orphan', 'undo_last', 'delete_memory',
+                 'delete_working_turn', 'attach_database',
                  'export_memories', 'purge_memories'):
         assert hasattr(TemporalMemoryPlugin, name), name
 
@@ -758,4 +760,183 @@ def test_maintenance_timer_skips_when_disabled(tmp_path):
     result = asyncio.run(plugin.on_maintenance_timer())
     assert result.ok is True
     assert result.value['skipped'] == 'disabled'
+
+
+# ---------------------------------------------------------------- 0.5.13
+
+
+def _offline_db(plugin, character: str, *, anchors: int = 1) -> str:
+    """造一个「磁盘上有、但没挂载」的角色库：直接写文件，不进 plugin._engines。"""
+    from temporal_memory.engine import MemoryEngine
+    path = plugin._db_path(character)
+    engine = MemoryEngine(path)
+    engine.store.set_owner(character)
+    for index in range(anchors):
+        engine.store.add_anchor(summary=f'{character} 第 {index} 条', quote='原话')
+    engine.store.add_turn('用户', f'{character} 的原话')
+    engine.store.close()
+    return path
+
+
+def test_unloaded_databases_appear_in_panel_snapshot(tmp_path):
+    """没挂载的角色库也要在面板露出来，但只读、不改文件、不进 memories 列表。"""
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='默认库的一句'))
+    asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    offline = _offline_db(plugin, '离线角色')
+    snapshot = plugin._settings_snapshot()
+
+    rows = snapshot['unloaded_databases']
+    assert len(rows) == 1
+    assert rows[0]['path'] == os.path.abspath(offline)
+    assert rows[0]['character'] == '离线角色'
+    assert rows[0]['anchors'] == 1
+    assert rows[0]['working_turns'] == 1
+    assert rows[0]['ok'] is True
+    # 已加载的默认库不算「未加载」，列表里也不会多出它的条目
+    assert all(row['path'] != os.path.abspath(plugin._db_path()) for row in rows)
+    assert {item.get('character') for item in snapshot['memories']} == {''}
+
+
+def test_unloaded_probe_does_not_touch_data(tmp_path):
+    """探针用 mode=ro：看过两次之后库里数据一点没变。"""
+    from temporal_memory.engine import MemoryEngine
+    plugin = _make_plugin(tmp_path)
+    offline = _offline_db(plugin, '离线角色', anchors=2)
+    plugin._unloaded_databases()
+    plugin._unloaded_cache = None
+    plugin._unloaded_databases()
+    reopened = MemoryEngine(offline)
+    try:
+        assert reopened.store.stats()['anchors'] == 2
+        assert reopened.store.get_owner() == '离线角色'
+    finally:
+        reopened.store.close()
+
+
+def test_export_memories_includes_unloaded_database(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    _offline_db(plugin, '离线角色')
+    payload = asyncio.run(plugin.export_memories()).value
+    assert payload['databases'] == 2
+    assert {item['character'] for item in payload['anchors']} == {'', '离线角色'}
+    assert 'failed_databases' not in payload
+
+
+def test_attach_database_loads_offline_role(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    offline = _offline_db(plugin, '离线角色')
+    assert len(plugin._settings_snapshot()['unloaded_databases']) == 1
+
+    result = asyncio.run(plugin.attach_database(path=offline))
+    assert result.ok is True
+    assert result.value['character'] == '离线角色'
+    snapshot = plugin._settings_snapshot()
+    assert snapshot['unloaded_databases'] == []
+    assert {item.get('character') for item in snapshot['memories']} == {'离线角色'}
+
+
+def test_attach_database_rejects_path_outside_data_dir(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    result = asyncio.run(plugin.attach_database(path=str(tmp_path / 'elsewhere.db')))
+    assert result.ok is False
+    assert '数据目录' in result.error.message
+
+
+def test_remember_paraphrase_lands_in_orphan_pending(tmp_path):
+    """工作记忆里有用户原话但对不上 → 降级未分组待确认，而不是直接进召回。"""
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='我喜欢喝美式'))
+    result = asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    assert result.ok is True
+    assert result.value['quote_verified'] is False
+    assert result.value['anchor']['status'] == 'pending'
+    assert result.value['reason'] == 'quote_not_in_working_memory'
+    orphans = plugin._settings_snapshot()['orphan_pending']
+    assert [item['id'] for item in orphans] == [result.value['anchor']['id']]
+
+
+def test_remember_accepts_quote_from_working_memory(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='记住，我对猫毛过敏，别给我猫'))
+    result = asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    assert result.value['quote_verified'] is True
+    assert result.value['anchor']['status'] == 'active'
+    assert plugin._settings_snapshot()['orphan_pending'] == []
+
+
+def test_remember_without_working_memory_keeps_old_behaviour(tmp_path):
+    """没有对照样本时不下判断（None），避免把正常写入误判成伪造。"""
+    plugin = _make_plugin(tmp_path)
+    result = asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    assert result.value['quote_verified'] is None
+    assert result.value['anchor']['status'] == 'active'
+
+
+def test_observe_degrades_fragment_not_in_source(tmp_path, monkeypatch):
+    """摘出来的句子不在用户原话里 → 落 pending，不参与确认和冲突判定。"""
+    import temporal_memory.engine as engine_module
+    from temporal_memory.engine import MemoryEngine
+
+    monkeypatch.setattr(
+        engine_module.scoring, 'extract_memory_fragments',
+        lambda *_a, **_k: [{'content': '我住在火星基地', 'quote': '我住在火星基地',
+                            'kind': 'fact'}])
+    engine = MemoryEngine(str(tmp_path / 'memory.db'))
+    out = engine.observe('今天天气不错', ts=100)
+    assert out['semantics'][0]['status'] == 'pending'
+    assert out['semantics'][0]['quote_verified'] is False
+    assert engine.store.stats()['statuses'].get('pending') == 1
+
+
+def test_delete_memory_reports_working_memory_hits(tmp_path):
+    """删记忆条不删原话：要把工作记忆里含这句的行回报给面板去确认。"""
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='我对猫毛过敏，很难受'))
+    engine = plugin._engines['']
+    item = engine.store.recent_semantics(kind='preference')[0]
+    turn = engine.store.recent_turns(8)[0]
+
+    result = asyncio.run(plugin.delete_memory(
+        table='semantics', id=item['id'], character='', confirmed=True))
+    assert result.ok is True
+    hits = result.value['working_memory_hits']
+    assert [hit['id'] for hit in hits] == [turn['id']]
+    assert hits[0]['character'] == ''
+    # 只是提示，不擅自删原话
+    assert engine.store.recent_turns(8)[0]['id'] == turn['id']
+
+
+def test_delete_memory_reports_no_hits_when_nothing_matches(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    engine = asyncio.run(plugin._ensure_engine('猫娘'))
+    item = engine.store.add_semantic('喜欢猫', quote='我喜欢猫')
+    result = asyncio.run(plugin.delete_memory(
+        table='semantics', id=item['id'], character='猫娘', confirmed=True))
+    assert result.value['working_memory_hits'] == []
+
+
+def test_secure_delete_pragma_is_on(tmp_path):
+    """删掉的字节直接零覆盖，单条删除不必再靠 VACUUM 收尾。"""
+    from temporal_memory.engine import MemoryEngine
+    engine = MemoryEngine(str(tmp_path / 'memory.db'))
+    conn = engine.store._connect()
+    try:
+        assert conn.execute('PRAGMA secure_delete').fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_pending_overdue_is_counted_in_snapshot(tmp_path):
+    """待确认超过 7 天要在状态栏提醒，否则没人记得去处理。"""
+    plugin = _make_plugin(tmp_path)
+    engine = asyncio.run(plugin._ensure_engine('猫娘'))
+    engine.store.add_anchor(summary='半信半疑', quote='原话',
+                            status='pending', ts=1_000_000)
+    snapshot = plugin._settings_snapshot()
+    assert snapshot['pending_alert_days'] == 7
+    assert snapshot['pending_overdue'] == 1
+    assert snapshot['pending_oldest_days'] > 7
+
 

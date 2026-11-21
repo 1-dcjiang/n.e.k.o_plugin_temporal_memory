@@ -216,6 +216,31 @@ def similarity(left: str, right: str) -> float:
     return len(a & b) / len(a | b)
 
 
+_QUOTE_NOISE = re.compile(r'[\s，,。.、；;：:！!？?（）()【】\[\]"“”\'‘’·|｜]+')
+
+
+def compact_text(text: str) -> str:
+    """去掉空白与标点，只留下可比对的字面内容。"""
+    return _QUOTE_NOISE.sub('', _normalize(text).lower())
+
+
+def quote_matches(quote: str, source: str, *, min_chars: int = 4) -> bool:
+    """判断一段「原话证据」是否来自给定的原文。
+
+    先做去标点后的互相包含，再用二元组相似度兜住模型补了「记住，」这类前后缀。
+    插件拿不到宿主聊天记录，这个检查只能保证插件内部自洽：
+    调用方整体伪造原话仍然挡不住，但拼接外部文本、片段张冠李戴会被拦下来。
+    """
+    left, right = compact_text(quote), compact_text(source)
+    if not left or not right:
+        return False
+    if left in right:
+        return True
+    if len(right) >= min_chars and right in left:
+        return True
+    return similarity(quote, source) >= 0.6
+
+
 _PREF_PREDICATE = re.compile(
     r'(?:我|本人)?(?P<mod>更|比较|最|特别|有点|不太|不)?'
     r'(?P<verb>喜欢|偏爱|讨厌|不喜欢|习惯|常用|爱吃|过敏|忌口|偏好|受不了|最烦|想要|希望)'

@@ -270,3 +270,13 @@
 - 文案与面板：`ui.strategy.enabled`、清空确认补迁移备份、工作记忆提示跟随 `working_window`、未分组区说明固定旧条仍生效。
 - 已知限制补充：单条删除不做 VACUUM，只有清空全部回收文件。
 - 版本 0.5.12，测试数 181 项 / 177 个 `def test_`。
+
+## 29. 边界项按需化（0.5.13）
+
+- 未加载角色库：只读探针（`mode=ro`，30 秒缓存）+ 面板列表 + `attach_database` 按需载入；不动启动全量挂载，不加 wm↔记忆条关联列。
+- 导出 `export_memories` 改为枚举 `_db_file_paths()`，未加载库临时打开读完就关，补 `databases` 与 `failed_databases`。
+- 原话核对：`scoring.quote_matches` 归一化包含 + 相似度兜底；`observe` 的 fragment、`remember` 对工作记忆用户行各自核对，不匹配降级未分组待确认并回 `quote_verified=false`；无对照样本时不做判断。
+- 删除联动：`delete_memory` 成功后按 quote 匹配 `wm`，回 `working_memory_hits`；面板二次确认后逐行 `delete_working_turn`。
+- 待确认可见性：`pending_alert_days` / `pending_overdue` / `pending_oldest_days` 进面板快照，状态栏提醒超 7 天未处理。
+- 存储：`PRAGMA secure_delete=ON`，单条删除零覆盖；清空全部仍 checkpoint + VACUUM。
+- 版本 0.5.13，测试数 194 项 / 190 个 `def test_`。
