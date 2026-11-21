@@ -8,4 +8,7 @@ dependencies = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# importlib 模式：插件装进 N.E.K.O 的 plugin/plugins/<id> 后，包链变成
+# plugin.plugins.*，conftest 里伪造的 plugin 包会挡住这条链路，
+# 导致市场 CI 的 check --release 全部 collect error。
+addopts = "-q --import-mode=importlib"
