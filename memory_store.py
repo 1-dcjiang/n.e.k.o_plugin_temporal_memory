@@ -236,6 +236,7 @@ class MemoryStore:
         self._lock = threading.RLock()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._fts_mode = 'none'
+        self._fts_secure_delete = False
         self._wal_mode_set = False
         self._tx_conn: sqlite3.Connection | None = None
         self._unique_index_skipped: list[str] = []
@@ -255,7 +256,8 @@ class MemoryStore:
             self._wal_mode_set = True
         conn.execute('PRAGMA synchronous=NORMAL')
         # 删除时释放的数据库页会被擦拭为零，省掉「单条删除后必须 VACUUM 才安心」的负担；
-        # 只覆盖数据库页本身：WAL 未截断的旧页和导出/备份副本仍是明文。
+        # 单条删除还会 optimize FTS 旧段并 checkpoint 截断 WAL。仍不覆盖：其他写入留下的
+        # WAL 旧帧、导出/备份副本、`*.migrated` 与磁盘快照。
         # 代价是释放页要多写一遍，用户量级（每库几千行）可以接受。
         conn.execute('PRAGMA secure_delete=ON')
         return conn
@@ -476,12 +478,70 @@ class MemoryStore:
                     f"USING fts5(id UNINDEXED, summary, tags, tokenize='{tokenizer}')"
                 )
                 self._fts_mode = tokenizer
+                self._configure_fts_secure_delete(conn)
                 if rebuild:
                     self._rebuild_fts(conn)
                 return
             except sqlite3.OperationalError:
                 continue
         self._fts_mode = 'none'
+        self._fts_secure_delete = False
+
+    def _configure_fts_secure_delete(self, conn: sqlite3.Connection) -> None:
+        """让 FTS5 删除时直接抹掉旧段里的词条，而不是只写删除标记。
+
+        3.44 起 FTS5 支持 `secure-delete` 配置项；更低版本只能靠删除后
+        `optimize` 合并段来重写索引（见 `_purge_delete_residue`）。
+        """
+        self._fts_secure_delete = False
+        if self._fts_mode == 'none':
+            return
+        if sqlite3.sqlite_version_info < (3, 44, 0):
+            return
+        try:
+            row = conn.execute(
+                "SELECT v FROM anchors_fts_config WHERE k='secure-delete'").fetchone()
+            if row is None or str(row['v']) != '1':
+                conn.execute(
+                    "INSERT INTO anchors_fts(anchors_fts, rank) "
+                    "VALUES('secure-delete', 1)")
+            self._fts_secure_delete = True
+        except sqlite3.Error as exc:
+            _LOG.warning('FTS secure-delete 配置失败，将在删除后 optimize: %s', exc)
+
+    def _purge_delete_residue(self) -> None:
+        """删除后清掉旧数据：低版本 FTS 合并段 + 截断 WAL 旧帧。
+
+        页面清零由连接上的 `PRAGMA secure_delete=ON` 负责；这里补两件它管不到的：
+        FTS 旧段（3.44 以下只能靠 optimize 重写）和 WAL 里尚未截断的旧页。
+        失败只记日志：删除本身已经完成，不能因为收尾失败回滚。
+        """
+        with self._lock:
+            try:
+                conn = self._connect()
+            except sqlite3.Error as exc:
+                _LOG.warning('删除后收尾重连失败: %s', exc)
+                return
+            try:
+                # 收尾连接不能跟着 timeout=10 等读事务：忙就立刻放弃并记日志，
+                # 不能让一次删除把面板卡住十秒。
+                conn.execute('PRAGMA busy_timeout=200')
+                if self._fts_mode != 'none' and not self._fts_secure_delete:
+                    try:
+                        conn.execute(
+                            "INSERT INTO anchors_fts(anchors_fts) VALUES('optimize')")
+                        conn.commit()
+                    except sqlite3.Error as exc:
+                        _LOG.warning('删除后 FTS optimize 失败: %s', exc)
+                try:
+                    busy, _log_frames, _done = conn.execute(
+                        'PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                    if busy:
+                        _LOG.warning('删除后 wal checkpoint 被读事务占用，旧帧暂留')
+                except sqlite3.Error as exc:
+                    _LOG.warning('删除后 wal checkpoint 失败: %s', exc)
+            finally:
+                conn.close()
 
     def _rebuild_fts(self, conn: sqlite3.Connection) -> None:
         if self._fts_mode == 'none':
@@ -537,6 +597,7 @@ class MemoryStore:
                 return False
             conn.execute('DELETE FROM wm WHERE id=?', (turn_id,))
             self._commit(conn)
+        self._purge_delete_residue()
         return True
 
     def workmem_hits(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -862,6 +923,7 @@ class MemoryStore:
                 self._purge_revision_refs(conn, anchor_id)
             conn.execute('DELETE FROM anchors WHERE id=?', (anchor_id,))
             self._commit(conn)
+        self._purge_delete_residue()
         return True
 
     def delete_semantic(self, semantic_id: str, *,
@@ -882,6 +944,7 @@ class MemoryStore:
                 self._purge_revision_refs(conn, semantic_id)
             conn.execute('DELETE FROM semantics WHERE id=?', (semantic_id,))
             self._commit(conn)
+        self._purge_delete_residue()
         return True
 
     def delete_permanent(self, table: str, memory_id: str) -> dict[str, Any]:

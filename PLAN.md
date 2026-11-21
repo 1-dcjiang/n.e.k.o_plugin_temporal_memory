@@ -312,3 +312,11 @@
 - 回滚完整性：快照保存/回滚 `orphan_truncated` / `archived_truncated`；维护错误提示改「最近一次维护失败…总开关关闭期间不会重试」。
 - 夹具与旧话：`BadStore` 四个普通方法各自抛 `RuntimeError`；`workmem_hits` docstring、`_connect` secure_delete 注释、README 保留行数、`ui.strategy.toggle_label` 一并清理。
 - 版本 0.5.17，测试数 229 项（228 passed + 1 skipped）/ 223 个 `def test_`。
+
+## 34. 删除路径收掉 FTS / WAL 残留（0.5.18）
+
+- 表形态：`anchors_fts` 为普通 contentful FTS5 表；`_ensure_fts` 建表后按 `sqlite3.sqlite_version_info >= (3, 44, 0)` 写 `('secure-delete', 1)`，配置已存在则不重复写，失败退 optimize。
+- 删除收尾：`_purge_delete_residue` 在 `delete_anchor` / `delete_semantic` / `delete_working_turn` 提交后执行；低版本先 `optimize`，再 `wal_checkpoint(TRUNCATE)`；收尾连接 `busy_timeout=200`，busy 时记日志。
+- 唯一词验证：`tests/test_delete_residue.py` 写 `zq7x9k` 删除后扫 `.db` / `-wal` 字节；对照组不配 secure-delete 的普通 FTS5 删同一词仍可搜到。
+- 文档：README 存储段与 guide 边界说明同步新行为，保留导出/备份/快照明文边界。
+- 版本 0.5.18，测试数 234 项（233 passed + 1 skipped）/ 228 个 `def test_`。

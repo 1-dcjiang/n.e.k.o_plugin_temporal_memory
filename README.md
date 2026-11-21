@@ -20,13 +20,13 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.5.17 按 A1358 复核收口 8 条轻项：窗口为 0 时面板/导出/快照统一显示 0 行；目标库打不开的报错不再说“其余库没有”；「一起删除」命中行按入参 `character` 标注；`_settings_snapshot` / `_aggregate_stats` / `_unloaded_databases` 遍历前先拷贝引擎表；快照回滚补齐 `orphan_truncated` / `archived_truncated`；维护错误说明写实（总开关关闭期间不重试）；`BadStore` 夹具改真抛 `RuntimeError`；README/docstring/注释/i18n 旧措辞清理。229 项测试（pytest 收集，含参数化；文件内 223 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
+> 当前状态：v0.5.18 把删除路径的残留收掉：sqlite 3.44+ 启用 FTS5 `secure-delete`（低版本删除后 `optimize`），每次单条删除后 `wal_checkpoint(TRUNCATE)` 截断 WAL，并用唯一词 `zq7x9k` 扫 `.db` / `-wal` 字节验证不残留（对照组保留旧行为，能搜到）。234 项测试（pytest 收集，含参数化；文件内 228 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
 
 ## 目录
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.5.17）
+├── plugin.toml            # 插件元信息与配置项（v0.5.18）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
@@ -129,7 +129,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 | `revisions` | 撤销台账 | `action, before_json, after_json, undone` |
 | `meta` | 链表头尾指针 + 轮次计数 | `head` / `tail` / `turn_no` |
 
-存储位置：插件私有数据目录，按角色分库为 `memory-<角色>-<sha256前8位>.db`；取不到角色名时沿用唯一已有的角色库，没有才用 `memory.db`，WAL 模式。老库启动时自动补列、回填 `quote=summary`，不会删数据；0.4.9 的 `memory-<角色>.db` 会在首次访问时迁到新哈希名。连接统一开 `PRAGMA secure_delete=ON`，删除时释放的数据库页被擦拭为零，单条删除不需要 VACUUM；只有「清空全部」会 checkpoint + VACUUM 回收文件。这个保证只到数据库页：WAL 未截断前的旧页、导出 JSON、`*.migrated` 迁移备份、磁盘快照仍可能是明文。
+存储位置：插件私有数据目录，按角色分库为 `memory-<角色>-<sha256前8位>.db`；取不到角色名时沿用唯一已有的角色库，没有才用 `memory.db`，WAL 模式。老库启动时自动补列、回填 `quote=summary`，不会删数据；0.4.9 的 `memory-<角色>.db` 会在首次访问时迁到新哈希名。连接统一开 `PRAGMA secure_delete=ON`，删除时释放的数据库页被擦拭为零；FTS 表在 sqlite 3.44 及以上启用 FTS5 的 `secure-delete`，删除时直接抹掉旧段里的词条，低版本退回删除后 `optimize` 合并段；每次单条删除后再跑 `wal_checkpoint(TRUNCATE)` 截断 WAL 旧帧。单条删除不需要 VACUUM；只有「清空全部」会 checkpoint + VACUUM 回收文件。这个保证只到数据库页：导出 JSON、`*.migrated` 迁移备份、磁盘快照仍可能是明文。
 
 ## 配置
 

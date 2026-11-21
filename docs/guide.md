@@ -96,4 +96,5 @@
 - 中文检索依赖 FTS5 trigram；若宿主 sqlite 版本过低会自动回落 `LIKE`，召回会变粗。
 - 升级后若 `memory.db` 与角色库同时存在，启动只挂角色库并跳过老库，避免统计重复；老库会留在目录里。
 - 只读快照打开 WAL 库时会留下 sqlite 自己的 `-wal` / `-shm` 附属文件，这是读取行为，不影响数据；下次载入该库时会被正常接管。
+- 单条永久删除会开 `secure_delete` 擦掉释放页、按 sqlite 版本启用 FTS5 `secure-delete`（低版本退回 `optimize`），并 `wal_checkpoint(TRUNCATE)` 截断 WAL 旧帧；导出 JSON、`*.migrated` 备份、磁盘快照不在覆盖范围内。
 - 暂不支持前瞻记忆（待办到期提醒）与回忆重构（每次回忆轻微改写摘要）。

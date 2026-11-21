@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.18
+
+把删除路径上的 FTS / WAL 残留直接收掉，不再只靠「等段合并」的推测：
+
+- 表形态确认：`anchors_fts` 是普通 contentful FTS5 表（`fts5(id UNINDEXED, summary, tags)`），不是 external content / contentless；删除默认只写删除标记，旧段里的词条要等合并才重写。
+- FTS 收尾：建表或启动时检查 `sqlite3.sqlite_version`，3.44 及以上执行 `INSERT INTO anchors_fts(anchors_fts, rank) VALUES('secure-delete', 1)`，删除时直接从旧段抹掉条目；更低版本在删除后跑 `INSERT INTO anchors_fts(anchors_fts) VALUES('optimize')` 合并段重写。
+- WAL 收尾：`delete_anchor` / `delete_semantic` / `delete_working_turn` 提交后调用 `_purge_delete_residue`，先按需 optimize，再 `wal_checkpoint(TRUNCATE)` 截断 WAL 旧帧；收尾连接 `busy_timeout=200`，被读事务占用时记日志而不是把删除卡十秒（实测全量测试从 122s 回到 37s）。
+- 验证用唯一词：新增 `tests/test_delete_residue.py`，写入 `zq7x9k` 后删除，把 `.db` 与 `-wal` 按字节读出断言搜不到；低版本路径把 `_fts_secure_delete` 置 False 模拟 optimize；对照组用不配 `secure-delete` 的普通 FTS5 表删同一词，断言仍能搜到，证明测试不是自证。
+- 文档改口：README 存储段与 guide 的边界说明改成「删除时擦释放页 + FTS secure-delete/optimize + 删除后截断 WAL」，仍保留导出 JSON、`*.migrated` 备份、磁盘快照的明文边界。
+- 版本 0.5.18，测试数 234 项（233 passed + 1 skipped）/ 228 个 `def test_`。
+
 ## 0.5.17
 
 A1358（对 0.5.16 的安全性与记忆影响复核）结论是「可以发布、无阻断项」，新列的 8 条全部为轻项，本版逐条收口：
