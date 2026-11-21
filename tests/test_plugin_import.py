@@ -695,3 +695,67 @@ def test_delete_working_turn_entry_removes_one_row(tmp_path):
     assert accepted.ok is True
     assert [t['content'] for t in engine.store.recent_turns(8)] == ['记得带伞']
 
+
+def test_delete_working_turn_empty_character_only_hits_one_db(tmp_path):
+    """wm.id 每库自增；character 必须定位到那一个库，不能删到别的库同 id 的行。"""
+    plugin = _make_plugin(tmp_path)
+    first = asyncio.run(plugin._ensure_engine('甲'))
+    first.observe('甲的一句')
+    second = asyncio.run(plugin._ensure_engine('乙'))
+    second.observe('乙的一句')
+    assert first.store.recent_turns(8)[0]['id'] == 1
+    assert second.store.recent_turns(8)[0]['id'] == 1
+
+    result = asyncio.run(plugin.delete_working_turn(
+        id=1, character='甲', confirmed=True))
+    assert result.ok is True
+    assert first.store.recent_turns(8) == []
+    assert [t['content'] for t in second.store.recent_turns(8)] == ['乙的一句']
+
+    # 空串只指默认库，不会误删角色库
+    asyncio.run(plugin.observe(user_text='默认库的一句'))
+    default_id = plugin._engines[''].store.recent_turns(8)[0]['id']
+    assert asyncio.run(plugin.delete_working_turn(
+        id=default_id, character='', confirmed=True)).ok is True
+    assert [t['content'] for t in second.store.recent_turns(8)] == ['乙的一句']
+
+
+def test_clear_memories_reports_reclaim_failure(tmp_path, monkeypatch):
+    from temporal_memory.memory_store import MemoryStore
+
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='今天出门忘带伞'))
+    monkeypatch.setattr(
+        MemoryStore, '_shrink_file', lambda self: {'wal_truncated': False,
+                                                   'vacuumed': False})
+    result = asyncio.run(plugin.clear_memories(confirmed=True))
+    assert result.ok is True
+    assert result.value['ok'] is True
+    assert result.value['reclaimed'] is False
+
+
+def test_purge_memories_keeps_going_after_one_db_fails(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    first = asyncio.run(plugin._ensure_engine('甲'))
+    second = asyncio.run(plugin._ensure_engine('乙'))
+    first.store.add_anchor(summary='旧事件', quote='原话')
+    first.archive('anchors', first.store.all_anchors()[0]['id'])
+
+    def _boom(*_a, **_k):
+        raise RuntimeError('bad db')
+
+    second.purge_stale = _boom
+    result = asyncio.run(plugin.purge_memories())
+    assert result.ok is True
+    assert result.value['ok'] is False
+    assert result.value['failed'] == 1
+    assert result.value['databases'] == 1
+
+
+def test_maintenance_timer_skips_when_disabled(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._settings['enabled'] = False
+    result = asyncio.run(plugin.on_maintenance_timer())
+    assert result.ok is True
+    assert result.value['skipped'] == 'disabled'
+

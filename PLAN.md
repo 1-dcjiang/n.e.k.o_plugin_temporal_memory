@@ -259,3 +259,14 @@
 - 面板 `act()` 读取返回值，清空/清理部分失败时提示失败库数。
 - 已知限制（写入文档）：召回只涨 `recall_count`/`last_recalled`，不刷新 `last_confirmed_at`；启动仍只挂载老库或已有 owner 的角色库，纯角色库要等首次调用才加载，面板/导出只覆盖已加载库。
 - 版本 0.5.11，测试数 175 项 / 171 个 `def test_`。
+
+## 28. A1343 复核收尾（0.5.12）
+
+- `delete_working_turn`：`character` 直接定位单库，`''`=默认库；不再 `or None` 跨库遍历，避免删到别库同 id 的 wm 行。
+- `clear_all` 回报 `reclaimed`，`_shrink_file` 返回 checkpoint/vacuum 明细；面板提示“磁盘未回收”。
+- `purge_memories` 逐库容错并回 `failed`/`databases`，不再一库异常整体报错。
+- `materialize_conflict` 的 pinned 分支复用已有未分组待确认，同一条新说法不重复堆积。
+- 总开关关闭时维护定时器直接返回 `skipped: disabled`。
+- 文案与面板：`ui.strategy.enabled`、清空确认补迁移备份、工作记忆提示跟随 `working_window`、未分组区说明固定旧条仍生效。
+- 已知限制补充：单条删除不做 VACUUM，只有清空全部回收文件。
+- 版本 0.5.12，测试数 181 项 / 177 个 `def test_`。

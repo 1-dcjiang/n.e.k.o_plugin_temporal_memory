@@ -882,31 +882,36 @@ class MemoryStore:
             self._set_meta(conn, 'tail', '')
             self._rebuild_fts(conn)
             self._commit(conn)
-        self._shrink_file()
-        return {'ok': True, **counts}
+        reclaim = self._shrink_file()
+        return {'ok': True, 'reclaimed': bool(reclaim['vacuumed']), **counts}
 
-    def _shrink_file(self) -> None:
+    def _shrink_file(self) -> dict[str, bool]:
         """清空后把文件真正压回去：截断 WAL + VACUUM。
 
-        只回收磁盘空间和残留页，不影响清空结果；被别处占用时记日志留待下次。
+        只回收磁盘空间和残留页，不影响清空结果；被别处占用时记日志留待下次，
+        并把失败如实回报给调用方（面板据此提示“已清空但磁盘未回收”）。
         """
+        status = {'wal_truncated': False, 'vacuumed': False}
         with self._lock:
             try:
                 conn = self._connect()
             except sqlite3.Error as exc:
                 _LOG.warning('清空后重连失败: %s', exc)
-                return
+                return status
             try:
                 try:
                     conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                    status['wal_truncated'] = True
                 except sqlite3.Error as exc:
                     _LOG.warning('清空后 wal checkpoint 失败: %s', exc)
                 try:
                     conn.execute('VACUUM')
+                    status['vacuumed'] = True
                 except sqlite3.Error as exc:
                     _LOG.warning('清空后 vacuum 失败: %s', exc)
             finally:
                 conn.close()
+        return status
 
     def purge_stale(self, now: int | None = None, *,
                     archived_days: int = PURGE_ARCHIVED_DAYS,
@@ -1633,6 +1638,26 @@ class MemoryStore:
             self._commit(conn)
         return {'ok': True, 'revision': revision, 'keep_id': keep_id}
 
+    def _existing_orphan(self, conn: sqlite3.Connection, table: str,
+                         new_item: dict[str, Any], quote: str) -> dict[str, Any] | None:
+        """找还没有冲突组的同一条待确认条目，避免反复反驳堆满孤儿。"""
+        if table == 'semantics':
+            content = str(new_item.get('content') or '').strip()
+            if not content:
+                return None
+            row = conn.execute(
+                "SELECT * FROM semantics WHERE status='pending' AND conflict_group='' "
+                'AND content=? ORDER BY created_at DESC LIMIT 1', (content,)).fetchone()
+        else:
+            summary = str(new_item.get('summary') or '').strip()
+            if not summary:
+                return None
+            row = conn.execute(
+                "SELECT * FROM anchors WHERE status='pending' AND conflict_group='' "
+                'AND summary=? AND quote=? ORDER BY ts DESC LIMIT 1',
+                (summary, quote)).fetchone()
+        return dict(row) if row else None
+
     def materialize_conflict(self, table: str, old_id: str, new_item: dict[str, Any],
                              group: str, *, quote: str, source_event_id: str = '',
                              kind: str, score: float = 0.0) -> dict[str, Any]:
@@ -1644,6 +1669,12 @@ class MemoryStore:
                 return {'ok': False, 'reason': 'not_found'}
             old = dict(old)
             now = _now()
+            if old.get('pinned'):
+                existing = self._existing_orphan(conn, table, new_item, quote)
+                if existing is not None:
+                    # 固定旧条被反复反驳：同一条新说法不再重复堆未分组待确认
+                    return {'ok': True, 'old': old, 'new': existing, 'group': '',
+                            'pinned_old': True, 'duplicate': True}
             if table == 'anchors':
                 new_row = self._insert_anchor(
                     conn, summary=str(new_item.get('summary') or ''), ts=now,

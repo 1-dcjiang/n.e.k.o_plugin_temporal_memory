@@ -1089,3 +1089,33 @@ def test_pinned_conflict_revision_undo_only_touches_new_item(engine):
     assert engine.store.get_memory('semantics', new['id'])['status'] == 'archived'
     assert engine.store.get_memory('semantics', old['id'])['status'] == 'active'
 
+
+def test_pinned_conflict_does_not_pile_orphans(engine):
+    """同一条新说法反复反驳固定旧条时，未分组待确认只留一条。"""
+    old = engine.store.add_semantic('我喜欢猫', quote='我喜欢猫', kind='preference')
+    engine.store.set_memory_state('semantics', old['id'], pinned=True,
+                                  record_revision=False)
+    first = engine._add_or_confirm_semantic(
+        '我讨厌猫', quote='我讨厌猫', kind='preference', tags=[], ts=2000,
+        source_event_id='evt-1', attach_anchor_id=None, source_kind='chat_turn')
+    second = engine._add_or_confirm_semantic(
+        '我讨厌猫', quote='我讨厌猫', kind='preference', tags=[], ts=2001,
+        source_event_id='evt-2', attach_anchor_id=None, source_kind='chat_turn')
+    assert second['id'] == first['id']
+    pending = engine.store.orphan_pending(50)
+    assert len(pending) == 1
+    assert engine.store.stats()['pending_conflicts'] == 0
+
+
+def test_clear_all_reports_reclaim_result(tmp_path, monkeypatch):
+    """checkpoint/VACUUM 失败要如实回 reclaimed=False，而不是假装成功。"""
+    store = MemoryStore(tmp_path / 'memory.db')
+    store.add_anchor(summary='一条', quote='原话')
+    assert store.clear_all()['reclaimed'] is True
+
+    monkeypatch.setattr(
+        MemoryStore, '_shrink_file',
+        lambda self: {'wal_truncated': False, 'vacuumed': False})
+    result = store.clear_all()
+    assert result['ok'] is True and result['reclaimed'] is False
+

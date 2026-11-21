@@ -147,6 +147,7 @@ export default function TemporalMemorySettings(
   const orphanPending = props.state?.orphan_pending || []
   const orphanPendingTruncated = Boolean(props.state?.orphan_pending_truncated)
   const workingMemory = props.state?.working_memory || []
+  const workingWindow = Number(config.working_window ?? 8) || 8
 
   const [enabled, setEnabled] = props.useLocalState(
     "enabled",
@@ -300,7 +301,7 @@ export default function TemporalMemorySettings(
     const first = await confirm({
       title: "清空全部记忆",
       message:
-        "将永久删除所有角色库的记忆、工作记忆、关联和撤销快照。此操作不可撤销。",
+        "将永久删除所有角色库的记忆、工作记忆、关联和撤销快照，并一并删掉迁移留下的 *.migrated 旧库备份；清空后执行 VACUUM 回收文件。此操作不可撤销。",
       tone: "danger",
       confirmLabel: "继续",
       cancelLabel: "取消",
@@ -316,8 +317,10 @@ export default function TemporalMemorySettings(
     if (!second) return
     const result = await act("clear_memories", { confirmed: true }, "清空全部记忆")
     if (result?.ok) {
+      const reclaimed =
+        result.reclaimed === false ? "；磁盘未回收（文件仍占空间，详见插件日志）" : ""
       setNotice(
-        `已清空 ${result.databases ?? 0} 个库：记忆 ${(result.anchors ?? 0) + (result.semantics ?? 0)} 条、工作记忆 ${result.working_turns ?? 0} 行。`,
+        `已清空 ${result.databases ?? 0} 个库：记忆 ${(result.anchors ?? 0) + (result.semantics ?? 0)} 条、工作记忆 ${result.working_turns ?? 0} 行${reclaimed}。`,
       )
     }
   }
@@ -445,6 +448,7 @@ export default function TemporalMemorySettings(
           <Card title="未分组待确认">            <Stack>
               <Alert tone="warning">
                 这些条目没有冲突组，但仍占用容量且不会正常召回。保留会转为有效记忆，归档会移出召回。
+                已固定的旧说法被新说法反驳时，旧条仍然有效并继续召回，新说法会出现在这里；处理这里不会改动已固定的旧条。
               </Alert>
               {orphanPendingTruncated && (
                 <Alert tone="warning">
@@ -484,8 +488,8 @@ export default function TemporalMemorySettings(
           <Card title="工作记忆（最近对话原文）">
             <Stack>
               <Alert tone="info">
-                这里显示每个角色最近 8 行原文（用户、助手各一行，约 4 轮对话）；内容会以明文保存在插件私有 sqlite，也会出现在导出 JSON 里。
-                窗口只按行数滚动，8 行不等于 8 轮；原话由模型每轮传入，插件无法逐字核对宿主聊天记录，发现可疑内容请永久删除。
+                {`这里显示每个角色最近 ${workingWindow} 行原文（用户、助手各一行，约 ${Math.ceil(workingWindow / 2)} 轮对话）；内容会以明文保存在插件私有 sqlite，也会出现在导出 JSON 里。`}
+                窗口只按行数滚动，行数不等于轮数；原话由模型每轮传入，插件无法逐字核对宿主聊天记录，发现可疑内容请永久删除。
               </Alert>
               {workingMemory.slice(0, 40).map((turn, index) => (
                 <Card

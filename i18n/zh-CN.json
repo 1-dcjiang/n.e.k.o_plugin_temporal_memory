@@ -29,7 +29,7 @@
   "ui.status.title": "记忆状态",
   "ui.status.tiers": "hot / warm / cold",
   "ui.strategy.title": "写入与生命周期",
-  "ui.strategy.enabled": "启用记忆写入",
+  "ui.strategy.enabled": "启用记忆写入与召回",
   "ui.strategy.disabled_hint": "关闭总开关后写入与召回一起停用；已有记忆仍可在面板查看和删除。",
   "ui.conflict.title": "待确认矛盾",
   "ui.conflict.hint": "新旧说法冲突时两边暂停召回；已固定的旧条目不会被冻结，新说法列为未分组待确认。",

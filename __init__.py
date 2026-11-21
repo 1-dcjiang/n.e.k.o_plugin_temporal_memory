@@ -787,7 +787,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
             'type': 'object',
             'properties': {
                 'id': {'type': 'integer', 'description': '工作记忆条目 id'},
-                'character': {'type': 'string', 'description': '条目所属角色库，空串表示默认库'},
+                'character': {
+                    'type': 'string',
+                    'description': '条目所属角色库，空串表示默认库（不传 null 才遍历所有库）',
+                },
                 'confirmed': {'type': 'boolean'},
             },
             'required': ['id', 'confirmed'],
@@ -807,7 +810,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         failures: list[str] = []
-        for path in self._delete_candidates(character or None, loaded):
+        # 空串必须是「默认库」：wm.id 是每库自增，跨库遍历会删到别的库同 id 的行
+        for path in self._delete_candidates(character, loaded):
             engine = loaded.get(path)
             opened = None
             try:
@@ -849,7 +853,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError('清空全部记忆需要二次确认'))
         total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
                                  'working_turns': 0, 'revisions': 0,
-                                 'databases': 0, 'failed': 0}
+                                 'databases': 0, 'failed': 0, 'reclaimed': True}
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         for path in self._db_file_paths():
@@ -869,6 +873,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 if opened is not None:
                     await asyncio.to_thread(opened.store.close)
             total['databases'] += 1
+            if not one.get('reclaimed'):
+                total['reclaimed'] = False
             for key in ('anchors', 'semantics', 'working_turns', 'revisions'):
                 total[key] += int(one.get(key) or 0)
         total['ok'] = total['failed'] == 0
@@ -908,15 +914,20 @@ class TemporalMemoryPlugin(NekoPluginBase):
         metadata={'agent_hidden': True},
     )
     async def purge_memories(self, **_):
-        total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0, 'total': 0}
-        try:
-            for engine in self._engines.values():
+        total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
+                                 'total': 0, 'databases': 0, 'failed': 0}
+        for engine in list(self._engines.values()):
+            try:
                 one = await asyncio.to_thread(engine.purge_stale)
-                for key in ('anchors', 'semantics', 'total'):
-                    total[key] += int(one.get(key) or 0)
-        except Exception as exc:
-            self.logger.warning('清理旧记忆失败: %s', exc)
-            return Err(SdkError('清理失败，请稍后重试'))
+            except Exception as exc:
+                # 单个库清理失败不整体报错：其余库照常清理，失败数回给面板
+                total['failed'] += 1
+                self.logger.warning('清理旧记忆失败: %s', exc)
+                continue
+            total['databases'] += 1
+            for key in ('anchors', 'semantics', 'total'):
+                total[key] += int(one.get(key) or 0)
+        total['ok'] = total['failed'] == 0
         return Ok(total)
 
     async def _memory_action(self, action: str, table: str, memory_id: str, **kwargs):
@@ -956,6 +967,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
     @timer_interval(id='maintenance', seconds=3600, name='休眠与分层维护', auto_start=True)
     async def on_maintenance_timer(self, **_):
         """每小时把久未确认的事件/偏好降为休眠，再重算热温冷。"""
+        if not self._settings.get('enabled', True):
+            # 总开关关闭 = 写入与召回全停，休眠沉降也一起暂停，避免无人使用时空转
+            return Ok({'skipped': 'disabled', 'slept': {'anchors': 0, 'semantics': 0},
+                       'moved': {'hot': 0, 'warm': 0, 'cold': 0}})
         slept = {'anchors': 0, 'semantics': 0}
         moved = {'hot': 0, 'warm': 0, 'cold': 0}
         for engine in list(self._engines.values()):
