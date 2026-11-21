@@ -8,18 +8,18 @@ v0.4 的核心原则：
 - **不自动注入**：不调用 `push_message`，不往下一轮对话里塞任何内容。
 - **按需拉取**：只有用户明确问到过去、模型调用 `recall_temporal_memory` 时，才返回仍然有效的条目。
 - **到期休眠**：事件 90 天、偏好/事实 180 天没有再次确认就自动休眠；手动固定不衰减。
-- **矛盾先待确认**：新旧说法冲突时两边暂停召回，面板里选一条采用，另一条归档；没有冲突组的待确认条目会单独列出，可逐条保留或归档。
+- **矛盾先待确认**：新旧说法冲突时两边暂停召回，面板里选一条采用，另一条归档；已固定的旧条目不会被冻结，新说法单独列为未分组待确认，可逐条保留或归档。
 - **可纠正可撤销**：摘要/内容、类型和标签都能改，**原话证据只读**；纠正、固定、移除、冲突处理都留撤销快照，最多保留最近 1000 条。
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
-- **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。
+- **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.5.10 在 0.5.9 上让总开关同时停用召回、把清空/永久删除覆盖到未加载库、并在面板列出已移除条目；165 项测试（pytest 收集，含参数化；文件内 161 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
+> 当前状态：v0.5.11 在 0.5.10 上修掉 A1341/A1342 核查确认的问题（文案纠错、逐库容错、清空回收、pin 冲突不冻结、工作记忆单条删除、关闭时不建空库、面板失败提示）；175 项测试（pytest 收集，含参数化；文件内 171 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
 
 ## 目录
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.5.10）
+├── plugin.toml            # 插件元信息与配置项（v0.5.11）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
@@ -100,8 +100,8 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 - 每条可确认、固定/取消、纠正（摘要/内容、类型、标签；原话只读）、移除。
 - 矛盾组单独置顶，逐条「采用这条」。
 - 「撤销上一步」只撤销最近一次动作，不会把别的角色库一起回滚。
-- 「导出 JSON」包含 `anchors`、`semantics` 与最近 8 轮 `working_memory`，含原话和状态；单表最多 10000 条、合计 20000 条，超限会返回 `truncated` 与提示。
-- 工作记忆卡片直接展示每个角色最近 8 轮用户/助手原文，并提示明文存储与模型传入。
+- 「导出 JSON」包含 `anchors`、`semantics` 与最近 `working_window` 行 `working_memory`（默认 8 行），含原话和状态；单表最多 10000 条、合计 20000 条，超限会返回 `truncated` 与提示。
+- 工作记忆卡片直接展示每个角色最近 8 行用户/助手原文（两行约一轮，8 行≈4 轮对话），每条可单独永久删除，并提示明文存储与模型传入。
 - 单条可「永久删除」，不必等 30 天清理；「清空全部记忆」两次确认后清空数据目录里的所有角色库，包括当前没加载的库。
 - 已移除条目单独列出，最多最近 120 条，可直接永久删除；总开关关闭后写入和召回都停用。
 
@@ -113,7 +113,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 | `anchors_fts` | 锚点全文索引 | FTS5，`trigram` 优先、回落 `unicode61`；短查询走 `LIKE` |
 | `semantics` | 偏好/事实/决定 | `content, quote, kind, status, score, last_confirmed_at, conflict_group, attach_anchor_id` |
 | `topics_edges` | 语义邻接 | `src, dst, weight`，按共享标签的 Jaccard 建边 |
-| `wm` | 工作记忆环形窗口 | `ts, role, content`，默认保留 8 轮 |
+| `wm` | 工作记忆环形窗口 | `ts, role, content`，默认保留 8 行（用户/助手各一行，约 4 轮） |
 | `revisions` | 撤销台账 | `action, before_json, after_json, undone` |
 | `meta` | 链表头尾指针 + 轮次计数 | `head` / `tail` / `turn_no` |
 
@@ -123,7 +123,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 总开关，关闭后 `observe` 不再写入 |
+| `enabled` | `true` | 总开关，关闭后写入与召回一起停用（不建新库） |
 | `working_window` | `8` | 工作记忆保留轮数 |
 | `anchor_threshold` | `0.3` | 建锚点阈值，越高越稀疏 |
 | `max_anchor_summary_chars` | `140` | 摘要上限；原话证据不受此限 |

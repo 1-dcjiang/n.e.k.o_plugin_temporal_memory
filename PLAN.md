@@ -246,3 +246,16 @@
 - `delete_memory` 增加可选 `character` 参数，面板传条目所属角色；未加载的角色库会临时打开删除后再关闭。
 - 面板新增“已移除的记忆（可永久删除）”，最近 120 条，解决 archived 条目只能等 30 天清理的问题。
 - 版本 0.5.10，测试数 165 项 / 161 个 `def test_`。
+
+## 27. A1341 / A1342 核查收尾（0.5.11）
+
+- 文案纠错：`i18n`、README、`docs/guide.md`、面板统一改成“关闭总开关后写入与召回一起停用”“工作记忆 8 行≈4 轮”。
+- `delete_memory` 逐库容错：单库异常只记账，不再中止整个查找；返回 `failed_databases`。
+- 未加载库的 `MemoryEngine(...)` 打开统一走 `asyncio.to_thread`（`delete_memory` / `clear_memories` / `delete_working_turn`）。
+- `clear_all` 后做 `wal_checkpoint(TRUNCATE)` + `VACUUM`；清空全部成功后连带删除 `*.migrated` 迁移备份（有失败时保留）。
+- `materialize_conflict` 遇到 `pinned=1` 旧条不再置 `pending`：旧条保持 active，新说法挂未分组待确认；撤销快照只回滚新条。
+- 工作记忆单条永久删除：`delete_working_turn` 入口 + 面板按钮。
+- 总开关关闭时 `observe`/`remember` 先判开关再取引擎，不再建空库。
+- 面板 `act()` 读取返回值，清空/清理部分失败时提示失败库数。
+- 已知限制（写入文档）：召回只涨 `recall_count`/`last_recalled`，不刷新 `last_confirmed_at`；启动仍只挂载老库或已有 owner 的角色库，纯角色库要等首次调用才加载，面板/导出只覆盖已加载库。
+- 版本 0.5.11，测试数 175 项 / 171 个 `def test_`。

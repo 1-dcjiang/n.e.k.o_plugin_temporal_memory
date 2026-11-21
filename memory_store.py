@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from .scoring import DOMAIN_TERMS
+
+_LOG = logging.getLogger(__name__)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -518,6 +521,20 @@ class MemoryStore:
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def delete_working_turn(self, turn_id: int) -> bool:
+        """永久删除工作记忆里的一条原话，不受窗口滚动限制。不可撤销。"""
+        try:
+            turn_id = int(turn_id)
+        except (TypeError, ValueError):
+            return False
+        with self._lock, self._session() as conn:
+            row = conn.execute('SELECT id FROM wm WHERE id=?', (turn_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute('DELETE FROM wm WHERE id=?', (turn_id,))
+            self._commit(conn)
+        return True
+
     # ---------------------------------------------------------------- 锚点链
 
     def _meta(self, conn: sqlite3.Connection, key: str) -> str:
@@ -865,7 +882,31 @@ class MemoryStore:
             self._set_meta(conn, 'tail', '')
             self._rebuild_fts(conn)
             self._commit(conn)
+        self._shrink_file()
         return {'ok': True, **counts}
+
+    def _shrink_file(self) -> None:
+        """清空后把文件真正压回去：截断 WAL + VACUUM。
+
+        只回收磁盘空间和残留页，不影响清空结果；被别处占用时记日志留待下次。
+        """
+        with self._lock:
+            try:
+                conn = self._connect()
+            except sqlite3.Error as exc:
+                _LOG.warning('清空后重连失败: %s', exc)
+                return
+            try:
+                try:
+                    conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                except sqlite3.Error as exc:
+                    _LOG.warning('清空后 wal checkpoint 失败: %s', exc)
+                try:
+                    conn.execute('VACUUM')
+                except sqlite3.Error as exc:
+                    _LOG.warning('清空后 vacuum 失败: %s', exc)
+            finally:
+                conn.close()
 
     def purge_stale(self, now: int | None = None, *,
                     archived_days: int = PURGE_ARCHIVED_DAYS,
@@ -1621,18 +1662,29 @@ class MemoryStore:
                     kind=kind, status='pending', score=score, conflict_group=group)
             if not new_row:
                 return {'ok': False, 'reason': 'empty_new_item'}
-            conn.execute(f'UPDATE {table} SET status=?, conflict_group=?, updated_at=? WHERE id=?',
-                         ('pending', group, now, old_id))
-            old_after = {**old, 'status': 'pending', 'conflict_group': group,
-                         'updated_at': now, '_table': table}
             new_before = {**new_row, 'status': 'archived', 'conflict_group': '',
                           '_table': table}
-            new_after = {**new_row, '_table': table}
+            pinned_old = bool(old.get('pinned'))
+            if pinned_old:
+                # 已固定是用户明确要求保留的结论：不冻结旧条，只把新说法挂成未分组待确认
+                conn.execute(f'UPDATE {table} SET conflict_group=?, updated_at=? WHERE id=?',
+                             ('', now, new_row['id']))
+                old_after = {**old, '_table': table}
+                new_after = {**new_row, 'conflict_group': '', '_table': table}
+            else:
+                conn.execute(
+                    f'UPDATE {table} SET status=?, conflict_group=?, updated_at=? WHERE id=?',
+                    ('pending', group, now, old_id))
+                old_after = {**old, 'status': 'pending', 'conflict_group': group,
+                             'updated_at': now, '_table': table}
+                new_after = {**new_row, '_table': table}
             self._record_revision(conn, 'conflict_create',
                                   [{**old, '_table': table}, new_before],
                                   [old_after, new_after])
             self._commit(conn)
-        return {'ok': True, 'old': old, 'new': new_row, 'group': group}
+        returned = ({**new_row, 'conflict_group': ''} if pinned_old else new_row)
+        return {'ok': True, 'old': old, 'new': returned,
+                'group': '' if pinned_old else group, 'pinned_old': pinned_old}
 
     def last_revision(self) -> dict[str, Any] | None:
         with self._lock, self._session() as conn:

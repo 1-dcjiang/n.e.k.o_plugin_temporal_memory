@@ -327,6 +327,11 @@ class MemoryEngine:
     def delete_permanent(self, table: str, memory_id: str) -> dict[str, Any]:
         return self.store.delete_permanent(table, memory_id)
 
+    def delete_working_turn(self, turn_id: int) -> dict[str, Any]:
+        ok = self.store.delete_working_turn(turn_id)
+        return ({'ok': True, 'id': int(turn_id)} if ok
+                else {'ok': False, 'reason': 'not_found'})
+
     def clear_all(self) -> dict[str, Any]:
         return self.store.clear_all()
 

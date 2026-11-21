@@ -615,3 +615,83 @@ def test_archived_memories_are_visible_for_permanent_delete(tmp_path):
     assert result.ok is True
     assert plugin._settings_snapshot()['archived'] == []
 
+
+# ---------------------------------------------------------------- A1341/A1342 收尾
+
+
+def test_observe_when_disabled_creates_no_database(tmp_path):
+    """总开关关闭时只回报 skipped，不给这个角色建空库。"""
+    plugin = _make_plugin(tmp_path)
+    plugin._settings['enabled'] = False
+    result = asyncio.run(plugin.observe(user_text='今天天气不错'))
+    assert result.ok is True
+    assert result.value['skipped'] == 'disabled'
+    assert not list(tmp_path.glob('memory*'))
+
+
+def test_remember_when_disabled_creates_no_database(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._settings['enabled'] = False
+    result = asyncio.run(plugin.remember(text='我对猫毛过敏'))
+    assert result.ok is True
+    assert result.value['skipped'] == 'disabled'
+    assert not plugin._engines
+
+
+def test_delete_memory_skips_unreadable_database(tmp_path):
+    """一个库打不开不能中止整个查找，后面的库仍要删除成功。"""
+    from temporal_memory.engine import MemoryEngine
+    plugin = _make_plugin(tmp_path)
+    good = plugin._db_path('bbb')
+    engine = MemoryEngine(good)
+    item = engine.store.add_anchor(summary='待删', quote='原话')
+    engine.store.close()
+    broken = plugin._db_path('aaa')
+    with open(broken, 'wb') as fh:
+        fh.write(b'not a sqlite database')
+    result = asyncio.run(plugin.delete_memory(
+        table='anchors', id=item['id'], confirmed=True))
+    assert result.ok is True
+    assert result.value['failed_databases']
+
+
+def test_clear_memories_surfaces_partial_failure(tmp_path):
+    """有库清不掉时要回 ok=False + failed，并保留迁移备份。"""
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='今天出门忘带伞'))
+    broken = plugin._db_path('坏库')
+    with open(broken, 'wb') as fh:
+        fh.write(b'not a sqlite database')
+    backup = tmp_path / 'memory.db.migrated'
+    backup.write_text('old', encoding='utf-8')
+    result = asyncio.run(plugin.clear_memories(confirmed=True))
+    assert result.ok is True
+    assert result.value['ok'] is False
+    assert result.value['failed'] == 1
+    assert backup.exists()
+
+
+def test_clear_memories_removes_migration_backup(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='今天出门忘带伞'))
+    backup = tmp_path / 'memory.db.migrated'
+    backup.write_text('old', encoding='utf-8')
+    result = asyncio.run(plugin.clear_memories(confirmed=True))
+    assert result.value['ok'] is True
+    assert result.value['backup_files'] == 1
+    assert not backup.exists()
+
+
+def test_delete_working_turn_entry_removes_one_row(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    asyncio.run(plugin.observe(user_text='今天忘带伞', assistant_text='记得带伞'))
+    engine = plugin._engines['']
+    turn = next(t for t in engine.store.recent_turns(8) if t['role'] == '用户')
+    rejected = asyncio.run(plugin.delete_working_turn(
+        id=turn['id'], confirmed=False))
+    assert rejected.ok is False
+    accepted = asyncio.run(plugin.delete_working_turn(
+        id=turn['id'], character='', confirmed=True))
+    assert accepted.ok is True
+    assert [t['content'] for t in engine.store.recent_turns(8)] == ['记得带伞']
+

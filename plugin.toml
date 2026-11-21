@@ -4,7 +4,7 @@ name = "时序记忆"
 description = "证据优先的分层时序记忆：原话摘录、事件/偏好到期休眠、手动保留不衰减、矛盾先待确认；不自动注入对话，只在需要时按需召回。"
 short_description = "原话证据 + 到期休眠 + 冲突待确认的时序记忆，按需召回。"
 keywords = ["记忆", "记住", "回忆", "时间线", "之前说过", "上次", "证据", "休眠", "memory", "timeline", "recall", "remember"]
-version = "0.5.10"
+version = "0.5.11"
 type = "plugin"
 entry = "plugin.plugins.temporal_memory:TemporalMemoryPlugin"
 

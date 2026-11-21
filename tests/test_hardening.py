@@ -1025,3 +1025,67 @@ def test_undo_last_never_updates_non_memory_table(store):
     assert result['restored'] == 1
     assert store.get_memory('semantics', item['id'])['content'] == '恢复内容'
 
+
+# ---------------------------------------------------------------- A1341/A1342 收尾
+
+
+def test_clear_all_reclaims_disk_space(tmp_path):
+    """清空后要真正回收文件：freelist 归零，文件比清空前小。"""
+    store = MemoryStore(tmp_path / 'memory.db')
+    for i in range(400):
+        store.add_anchor(summary=f'事件{i}', quote='原话' * 120, ts=i)
+    size_before = os.path.getsize(store.db_path)
+    store.clear_all()
+    conn = sqlite3.connect(store.db_path)
+    try:
+        freelist = int(conn.execute('PRAGMA freelist_count').fetchone()[0])
+    finally:
+        conn.close()
+    assert freelist == 0
+    assert os.path.getsize(store.db_path) < size_before
+
+
+def test_working_turn_delete_is_single_row(engine):
+    """工作记忆能按行删，不牵动同窗口的其他原话。"""
+    engine.observe('第一句', '第一答', ts=100)
+    engine.observe('第二句', '第二答', ts=101)
+    turns = engine.store.recent_turns(8)
+    assert engine.delete_working_turn(turns[0]['id'])['ok'] is True
+    assert [t['content'] for t in engine.store.recent_turns(8)] == [
+        '第一答', '第二句', '第二答']
+    assert engine.delete_working_turn(turns[0]['id'])['ok'] is False
+
+
+def test_conflict_keeps_pinned_old_active(engine):
+    """已固定的旧条不能被新说法冻结，新说法落到未分组待确认。"""
+    old = engine.store.add_semantic('我喜欢猫', quote='我喜欢猫', kind='preference')
+    engine.store.set_memory_state('semantics', old['id'], pinned=True)
+    new = engine._add_or_confirm_semantic(
+        '我讨厌猫', quote='我讨厌猫', kind='preference', tags=[], ts=2000,
+        source_event_id='', attach_anchor_id=None, source_kind='chat_turn')
+    assert new['status'] == 'pending'
+    assert new['conflict_group'] == ''
+    old_row = engine.store.get_memory('semantics', old['id'])
+    assert old_row['status'] == 'active'
+    assert old_row['pinned'] == 1
+    assert [i['id'] for i in engine.recall('猫')['semantics']] == [old['id']]
+
+    resolved = engine.resolve_orphan('semantics', new['id'], keep=False)
+    assert resolved['ok'] is True
+    assert engine.store.get_memory('semantics', new['id'])['status'] == 'archived'
+    assert engine.store.get_memory('semantics', old['id'])['status'] == 'active'
+
+
+def test_pinned_conflict_revision_undo_only_touches_new_item(engine):
+    """pinned 冲突的撤销快照只回滚新条，旧条保持 active。"""
+    old = engine.store.add_semantic('我喜欢猫', quote='我喜欢猫', kind='preference')
+    engine.store.set_memory_state('semantics', old['id'], pinned=True,
+                                  record_revision=False)
+    new = engine._add_or_confirm_semantic(
+        '我讨厌猫', quote='我讨厌猫', kind='preference', tags=[], ts=2000,
+        source_event_id='', attach_anchor_id=None, source_kind='chat_turn')
+    result = engine.undo()
+    assert result['ok'] is True
+    assert engine.store.get_memory('semantics', new['id'])['status'] == 'archived'
+    assert engine.store.get_memory('semantics', old['id'])['status'] == 'active'
+

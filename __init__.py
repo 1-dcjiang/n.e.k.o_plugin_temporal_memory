@@ -163,6 +163,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
     )
     async def observe(self, user_text: str = '', assistant_text: str = '',
                       source_event_id: str = '', ts: int | None = None, **_):
+        if not self._settings.get('enabled', True):
+            # 总开关关闭时直接短路，避免为了返回 skipped 给该角色建空库
+            return Ok({'ok': True, 'skipped': 'disabled', 'turn_no': 0,
+                       'anchored': False, 'anchor': None, 'semantics': []})
         character = self._character(_)
         engine = await self._ensure_engine(character)
         if engine is None:
@@ -213,6 +217,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
     async def remember(self, text: str = '', source_event_id: str = '',
                        ts: int | None = None, pinned: bool = False,
                        tags: list[str] | None = None, **_):
+        if not self._settings.get('enabled', True):
+            # 同上：关闭时不建空库，只回报跳过
+            return Ok({'ok': True, 'skipped': 'disabled', 'anchor': None,
+                       'kind': '', 'semantics': []})
         character = self._character(_)
         engine = await self._ensure_engine(character)
         if engine is None:
@@ -735,31 +743,94 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError('永久删除需要二次确认'))
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
-        if character is not None:
-            target = os.path.abspath(self._db_path(character))
-            candidates = [target] if target in loaded or os.path.exists(target) else []
-        else:
-            candidates = self._db_file_paths()
-            candidates.sort(key=lambda path: (path not in loaded, path))
         try:
-            for path in candidates:
-                engine = loaded.get(path)
-                opened = None
-                try:
-                    if engine is None:
-                        opened = MemoryEngine(path, dict(self._settings))
-                        engine = opened
-                    result = await asyncio.to_thread(
-                        engine.delete_permanent, table, id)
-                finally:
-                    if opened is not None:
-                        await asyncio.to_thread(opened.store.close)
-                if result.get('ok'):
-                    return Ok(result)
+            candidates = self._delete_candidates(character, loaded)
         except Exception as exc:
-            self.logger.warning('永久删除失败: %s', exc)
+            self.logger.warning('永久删除定位失败: %s', exc)
             return Err(SdkError('永久删除失败，请稍后重试'))
+        failures: list[str] = []
+        for path in candidates:
+            engine = loaded.get(path)
+            opened = None
+            try:
+                if engine is None:
+                    opened = await asyncio.to_thread(
+                        MemoryEngine, path, dict(self._settings))
+                    engine = opened
+                result = await asyncio.to_thread(
+                    engine.delete_permanent, table, id)
+            except Exception as exc:
+                # 单个库打不开不影响继续找其他库；失败只记账，不中止
+                failures.append(os.path.basename(path))
+                self.logger.warning('永久删除失败(%s): %s', os.path.basename(path), exc)
+                continue
+            finally:
+                if opened is not None:
+                    await asyncio.to_thread(opened.store.close)
+            if result.get('ok'):
+                payload = dict(result)
+                if failures:
+                    payload['failed_databases'] = failures
+                return Ok(payload)
+        if failures:
+            self.logger.warning('永久删除未完成，失败库: %s', ', '.join(failures))
+            return Err(SdkError(
+                f'有 {len(failures)} 个记忆库打不开，已跳过；其余库没有这条记忆'))
         return Err(SdkError('没有找到这条记忆'))
+
+    @ui.action(label='永久删除', tone='danger', refresh_context=True)
+    @plugin_entry(
+        id='delete_working_turn',
+        name='永久删除一条工作记忆',
+        description='立即永久删除工作记忆里的一条原话，不受窗口滚动限制；不可撤销，需面板二次确认。',
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'id': {'type': 'integer', 'description': '工作记忆条目 id'},
+                'character': {'type': 'string', 'description': '条目所属角色库，空串表示默认库'},
+                'confirmed': {'type': 'boolean'},
+            },
+            'required': ['id', 'confirmed'],
+        },
+        metadata={'agent_hidden': True},
+    )
+    async def delete_working_turn(self, id: int = 0, character: str = '',
+                                  confirmed: bool = False, **_):
+        try:
+            turn_id = int(id or 0)
+        except (TypeError, ValueError):
+            turn_id = 0
+        if turn_id <= 0:
+            return Err(SdkError('id 必填：请传入面板上的工作记忆条目 id'))
+        if not confirmed:
+            return Err(SdkError('永久删除需要二次确认'))
+        loaded = {os.path.abspath(engine.store.db_path): engine
+                  for engine in self._engines.values()}
+        failures: list[str] = []
+        for path in self._delete_candidates(character or None, loaded):
+            engine = loaded.get(path)
+            opened = None
+            try:
+                if engine is None:
+                    opened = await asyncio.to_thread(
+                        MemoryEngine, path, dict(self._settings))
+                    engine = opened
+                result = await asyncio.to_thread(
+                    engine.delete_working_turn, turn_id)
+            except Exception as exc:
+                failures.append(os.path.basename(path))
+                self.logger.warning('删除工作记忆失败(%s): %s',
+                                    os.path.basename(path), exc)
+                continue
+            finally:
+                if opened is not None:
+                    await asyncio.to_thread(opened.store.close)
+            if result.get('ok'):
+                return Ok(result)
+        if failures:
+            return Err(SdkError(
+                f'有 {len(failures)} 个记忆库打不开，已跳过；其余库没有这条工作记忆'))
+        return Err(SdkError('没有找到这条工作记忆'))
 
     @ui.action(label='清空全部记忆', tone='danger', refresh_context=True)
     @plugin_entry(
@@ -786,7 +857,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
             opened = None
             try:
                 if engine is None:
-                    opened = MemoryEngine(path, dict(self._settings))
+                    opened = await asyncio.to_thread(
+                        MemoryEngine, path, dict(self._settings))
                     engine = opened
                 one = await asyncio.to_thread(engine.clear_all)
             except Exception as exc:
@@ -800,7 +872,29 @@ class TemporalMemoryPlugin(NekoPluginBase):
             for key in ('anchors', 'semantics', 'working_turns', 'revisions'):
                 total[key] += int(one.get(key) or 0)
         total['ok'] = total['failed'] == 0
+        total['backup_files'] = 0
+        if total['ok']:
+            total['backup_files'] = self._remove_migration_backups()
         return Ok(total)
+
+    def _remove_migration_backups(self) -> int:
+        """清空全部成功后，连带删掉迁移留下的 *.migrated：里面是旧库全文。"""
+        parent = os.path.dirname(self._db_path())
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            names = []
+        removed = 0
+        for name in names:
+            if '.db.migrated' not in name:
+                continue
+            try:
+                os.remove(os.path.join(parent, name))
+            except OSError as exc:
+                self.logger.warning('删除迁移备份失败(%s): %s', name, exc)
+                continue
+            removed += 1
+        return removed
 
     @ui.action(label='清理旧记忆', refresh_context=True)
     @plugin_entry(
@@ -997,6 +1091,16 @@ class TemporalMemoryPlugin(NekoPluginBase):
             if name.startswith('memory-') and name.endswith('.db'):
                 paths.add(os.path.abspath(os.path.join(parent, name)))
         return sorted(paths)
+
+    def _delete_candidates(self, character: str | None,
+                           loaded: dict[str, Any]) -> list[str]:
+        """单个角色只查它的库；没指定角色时按「已加载优先」把所有库排一遍。"""
+        if character is not None:
+            target = os.path.abspath(self._db_path(character))
+            return [target] if target in loaded or os.path.exists(target) else []
+        candidates = self._db_file_paths()
+        candidates.sort(key=lambda path: (path not in loaded, path))
+        return candidates
 
     def _migrate_legacy_role_db(self, character: str, target: str) -> None:
         legacy = self._legacy_db_path(character)

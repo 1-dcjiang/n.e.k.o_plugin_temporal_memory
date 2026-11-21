@@ -92,7 +92,7 @@ const NUMERIC_FIELDS: Array<{
   label: string
   help: string
 }> = [
-  { key: "working_window", label: "工作记忆轮数", help: "保留最近多少轮原文；只影响本插件私有库。" },
+  { key: "working_window", label: "工作记忆行数", help: "保留最近多少行原文；用户与助手各占一行，8 行约 4 轮对话。只影响本插件私有库。" },
   { key: "anchor_threshold", label: "建锚点阈值 (0~1)", help: "越高越稀疏，只留大事。" },
   { key: "max_anchor_summary_chars", label: "摘要字符上限", help: "摘要可以截断，原话证据不受这个上限影响。" },
   { key: "hot_recall_window_days", label: "hot 观察窗（天）", help: "多久内被召回算热点。" },
@@ -161,6 +161,7 @@ export default function TemporalMemorySettings(
   const [editKind, setEditKind] = props.useLocalState("editKind", () => "")
   const [editTags, setEditTags] = props.useLocalState("editTags", () => "")
   const [openId, setOpenId] = props.useLocalState("openId", () => "")
+  const [notice, setNotice] = props.useLocalState("notice", () => "")
   const confirm = useConfirm()
 
   function setValue(key: string, value: string) {
@@ -182,9 +183,30 @@ export default function TemporalMemorySettings(
     await props.api.refresh()
   }
 
-  async function act(action: string, args: Record<string, unknown>) {
-    await props.api.call(action, args)
+  async function act(
+    action: string,
+    args: Record<string, unknown>,
+    label = action,
+  ): Promise<any> {
+    let payload: any = null
+    try {
+      const result: any = await props.api.call(action, args)
+      payload = result?.value ?? result?.data ?? result
+    } catch (error) {
+      setNotice(`${label}失败：${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+    if (payload && payload.ok === false) {
+      // 清空/清理是跨库操作：单个库失败时后端返回 ok=false + failed 计数
+      const failed = Number(payload.failed ?? 0)
+      setNotice(
+        `${label}没有全部成功${failed > 0 ? `（${failed} 个库失败）` : ""}；失败的库原样保留，详见插件日志。`,
+      )
+    } else {
+      setNotice("")
+    }
     await props.api.refresh()
+    return payload
   }
 
   function startCorrection(item: MemoryItem) {
@@ -228,7 +250,31 @@ export default function TemporalMemorySettings(
       cancelLabel: "取消",
     })
     if (!accepted) return
-    await act("purge_memories", {})
+    const result = await act("purge_memories", {}, "清理旧记忆")
+    if (result?.ok) {
+      setNotice(`已清理 ${result.total ?? 0} 条旧记忆（锚点 ${result.anchors ?? 0}、偏好/事实 ${result.semantics ?? 0}）。`)
+    }
+  }
+
+  async function deleteWorkingTurn(turn: WorkingTurn) {
+    const accepted = await confirm({
+      title: "永久删除这条工作记忆",
+      message:
+        "会立即从工作记忆里删掉这条原话，不受窗口滚动限制。此操作不可撤销。",
+      tone: "danger",
+      confirmLabel: "永久删除",
+      cancelLabel: "取消",
+    })
+    if (!accepted) return
+    await act(
+      "delete_working_turn",
+      {
+        id: turn.id ?? 0,
+        character: turn.character ?? "",
+        confirmed: true,
+      },
+      "删除工作记忆",
+    )
   }
 
   async function deleteForever(item: MemoryItem) {
@@ -247,7 +293,7 @@ export default function TemporalMemorySettings(
       confirmed: true,
     }
     if (item.character !== undefined) payload.character = item.character
-    await act("delete_memory", payload)
+    await act("delete_memory", payload, "永久删除")
   }
 
   async function clearAll() {
@@ -268,7 +314,12 @@ export default function TemporalMemorySettings(
       cancelLabel: "取消",
     })
     if (!second) return
-    await act("clear_memories", { confirmed: true })
+    const result = await act("clear_memories", { confirmed: true }, "清空全部记忆")
+    if (result?.ok) {
+      setNotice(
+        `已清空 ${result.databases ?? 0} 个库：记忆 ${(result.anchors ?? 0) + (result.semantics ?? 0)} 条、工作记忆 ${result.working_turns ?? 0} 行。`,
+      )
+    }
   }
 
   const visible = memories.filter(
@@ -281,6 +332,9 @@ export default function TemporalMemorySettings(
   return (
     <Page title="时序记忆" subtitle="原话证据 + 到期休眠 + 矛盾待确认，不自动注入对话">
       <Stack>
+        {notice && (
+          <Alert tone="warning">{notice}</Alert>
+        )}
         <Card title="记忆状态">
           <Stack>
             {props.state?.status?.legacy_ignored && (
@@ -430,15 +484,22 @@ export default function TemporalMemorySettings(
           <Card title="工作记忆（最近对话原文）">
             <Stack>
               <Alert tone="info">
-                这里显示每个角色最近 8 轮原文，包含用户和助手的话；内容会以明文保存在插件私有 sqlite，也会出现在导出 JSON 里。
-                原话由模型每轮传入，插件无法逐字核对宿主聊天记录，发现可疑内容请永久删除。
+                这里显示每个角色最近 8 行原文（用户、助手各一行，约 4 轮对话）；内容会以明文保存在插件私有 sqlite，也会出现在导出 JSON 里。
+                窗口只按行数滚动，8 行不等于 8 轮；原话由模型每轮传入，插件无法逐字核对宿主聊天记录，发现可疑内容请永久删除。
               </Alert>
               {workingMemory.slice(0, 40).map((turn, index) => (
                 <Card
                   key={`${turn.character || ""}:${turn.id ?? index}`}
                   title={`${(turn.role === "assistant" || turn.role === "助手") ? "助手" : "用户"}｜${turn.ts ? new Date(turn.ts * 1000).toLocaleString() : ""}${turn.character ? `｜${turn.character}` : ""}`}
                 >
-                  <Text>{turn.content || ""}</Text>
+                  <Stack>
+                    <Text>{turn.content || ""}</Text>
+                    <Inline align="center" justify="end">
+                      <Button tone="danger" onClick={() => deleteWorkingTurn(turn)}>
+                        永久删除这条
+                      </Button>
+                    </Inline>
+                  </Stack>
                 </Card>
               ))}
             </Stack>
@@ -449,6 +510,7 @@ export default function TemporalMemorySettings(
           <Stack>
             <Alert tone="info">
               每条都能看到原话、来源和剩余休眠天数。纠正/固定/移除都会留撤销记录。
+              召回只增加召回计数，不会刷新「最后确认时间」：只有你在面板确认或模型重新确认，休眠倒计时才会重置。
             </Alert>
             {memoriesTruncated && (
               <Alert tone="warning">
