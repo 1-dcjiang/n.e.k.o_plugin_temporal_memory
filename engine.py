@@ -389,13 +389,14 @@ class MemoryEngine:
         semantics = self.store.all_memories('semantics', cap + 1)
         anchors_truncated = len(anchors) > cap
         semantics_truncated = len(semantics) > cap
+        window = self.settings.get('working_window')
+        window = 8 if window is None else max(0, int(window))
         return {
             'exported_at': int(time.time()),
             'schema': 4,
             'anchors': anchors[:cap],
             'semantics': semantics[:cap],
-            'working_memory': self.store.recent_turns(
-                max(1, int(self.settings.get('working_window') or 8))),
+            'working_memory': self.store.recent_turns(window),
             'truncated': {'anchors': anchors_truncated,
                           'semantics': semantics_truncated},
         }

@@ -20,13 +20,13 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.5.16 补 A1351 之外的两处读取路径容错：`_aggregate_stats` 与 `_settings_snapshot` 逐库 try/except（坏库跳过并回滚半截数据、坏库名进 `stats_errors` / `read_errors`），`_maintenance_errors` 进快照与 `status` 供面板提示；同时把 `secure_delete` 的说法收窄为“只对释放的数据库页生效”，写清 WAL/导出/备份/快照仍可能是明文；221 项测试（pytest 收集，含参数化；文件内 216 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
+> 当前状态：v0.5.17 按 A1358 复核收口 8 条轻项：窗口为 0 时面板/导出/快照统一显示 0 行；目标库打不开的报错不再说“其余库没有”；「一起删除」命中行按入参 `character` 标注；`_settings_snapshot` / `_aggregate_stats` / `_unloaded_databases` 遍历前先拷贝引擎表；快照回滚补齐 `orphan_truncated` / `archived_truncated`；维护错误说明写实（总开关关闭期间不重试）；`BadStore` 夹具改真抛 `RuntimeError`；README/docstring/注释/i18n 旧措辞清理。229 项测试（pytest 收集，含参数化；文件内 223 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
 
 ## 目录
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.5.16）
+├── plugin.toml            # 插件元信息与配置项（v0.5.17）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
@@ -136,7 +136,7 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关，关闭后写入与召回一起停用（不建新库） |
-| `working_window` | `8` | 工作记忆保留轮数 |
+| `working_window` | `8` | 工作记忆保留行数（两行约一轮，0 表示不保留） |
 | `anchor_threshold` | `0.3` | 建锚点阈值，越高越稀疏 |
 | `max_anchor_summary_chars` | `140` | 摘要上限；原话证据不受此限 |
 | `hot_recall_window_days` | `7` | hot 判定的召回观察窗 |

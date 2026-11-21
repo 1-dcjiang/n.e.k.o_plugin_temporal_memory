@@ -369,10 +369,13 @@ class TemporalMemoryPlugin(NekoPluginBase):
         orphan_truncated = False
         archived_truncated = False
         read_errors: list[str] = []
-        for character, engine in self._engines.items():
+        window = self._working_window()
+        # 遍历期间可能有新角色库在事件循环里挂上：先拷贝一份，避免 dict 变化中断整次刷新
+        for character, engine in list(self._engines.items()):
             # 单个库读失败只跳过它：面板其余角色照常刷新，坏库名报到状态里
             marks = (len(memories), len(archived), len(conflicts),
                      len(orphans), len(working))
+            flags = (orphan_truncated, archived_truncated)
             try:
                 for item in engine.list_memories(
                         300, statuses=('active', 'dormant')):
@@ -385,9 +388,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 for item in batch:
                     item['character'] = character
                     archived.append(item)
-                for turn in engine.store.recent_turns(self._working_window()):
-                    turn['character'] = character
-                    working.append(turn)
+                if window > 0:
+                    for turn in engine.store.recent_turns(window):
+                        turn['character'] = character
+                        working.append(turn)
                 for item in engine.store.pending_conflicts():
                     item['character'] = character
                     item['table'] = item.pop('table_name', item.get('table') or '')
@@ -403,11 +407,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
                     item['text'] = item.get('content') or ''
                     orphans.append(item)
             except Exception as exc:
-                # 回滚这个库已经追加的部分，避免面板出现“半个角色”
+                # 回滚这个库已经追加的部分和截断标志，避免面板出现“半个角色”
                 for name, count in zip(
                         (memories, archived, conflicts, orphans, working), marks,
                         strict=True):
                     del name[count:]
+                orphan_truncated, archived_truncated = flags
                 read_errors.append(character)
                 self.logger.warning(
                     '读取角色库失败(%s): %s', character or '默认库', exc)
@@ -825,7 +830,6 @@ class TemporalMemoryPlugin(NekoPluginBase):
                         MemoryEngine, path, dict(self._settings))
                     engine = opened
                 before = await asyncio.to_thread(engine.store.get_memory, table, id)
-                owner = await asyncio.to_thread(engine.store.get_owner)
                 result = await asyncio.to_thread(
                     engine.delete_permanent, table, id)
             except Exception as exc:
@@ -847,7 +851,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
                         hits = await asyncio.to_thread(
                             engine.store.workmem_hits, quote)
                         payload['working_memory_hits'] = [
-                            {**hit, 'character': owner}
+                            {**hit, 'character': character}
                             for hit in hits]
                     except Exception as exc:
                         self.logger.warning('查工作记忆联动提示失败: %s', exc)
@@ -857,7 +861,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         if failures:
             self.logger.warning('永久删除未完成，失败库: %s', ', '.join(failures))
             return Err(SdkError(
-                f'有 {len(failures)} 个记忆库打不开，已跳过；其余库没有这条记忆'))
+                '目标记忆库打不开（{}），未删除'.format(', '.join(failures))))
         return Err(SdkError('没有找到这条记忆'))
 
     @ui.action(label='永久删除', tone='danger', refresh_context=True)
@@ -917,7 +921,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 return Ok(result)
         if failures:
             return Err(SdkError(
-                f'有 {len(failures)} 个记忆库打不开，已跳过；其余库没有这条工作记忆'))
+                '目标记忆库打不开（{}），未删除'.format(', '.join(failures))))
         return Err(SdkError('没有找到这条工作记忆'))
 
     @ui.action(label='载入角色库', refresh_context=True)
@@ -1315,7 +1319,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         if self._unloaded_cache and now - self._unloaded_cache[0] < UNLOADED_PROBE_TTL:
             return [dict(item) for item in self._unloaded_cache[1]]
         loaded = {os.path.abspath(engine.store.db_path)
-                  for engine in self._engines.values()}
+                  for engine in list(self._engines.values())}
         result = [self._probe_database(path) for path in self._db_file_paths()
                   if path not in loaded]
         self._unloaded_cache = (now, result)
@@ -1380,7 +1384,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
         statuses: dict[str, int] = {}
         max_role_used = 0
         skipped: list[str] = []
-        for character, engine in self._engines.items():
+        # 拷贝一份：面板刷新在 worker 线程跑，可能遇上新库挂载
+        for character, engine in list(self._engines.items()):
             try:
                 stats = engine.store.stats()
             except Exception as exc:

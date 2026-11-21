@@ -254,7 +254,8 @@ class MemoryStore:
             conn.execute('PRAGMA journal_mode=WAL')
             self._wal_mode_set = True
         conn.execute('PRAGMA synchronous=NORMAL')
-        # 删掉的字节直接零覆盖，省掉「单条删除后必须 VACUUM 才安心」的负担；
+        # 删除时释放的数据库页会被擦拭为零，省掉「单条删除后必须 VACUUM 才安心」的负担；
+        # 只覆盖数据库页本身：WAL 未截断的旧页和导出/备份副本仍是明文。
         # 代价是释放页要多写一遍，用户量级（每库几千行）可以接受。
         conn.execute('PRAGMA secure_delete=ON')
         return conn
@@ -520,7 +521,7 @@ class MemoryStore:
         with self._lock, self._session() as conn:
             rows = conn.execute(
                 'SELECT id, ts, role, content FROM wm ORDER BY id DESC LIMIT ?',
-                (max(1, limit),),
+                (max(0, int(limit)),),
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
@@ -539,8 +540,10 @@ class MemoryStore:
         return True
 
     def workmem_hits(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
-        """按字面匹配工作记忆里含这段原话的行，供删除联动提示。
+        """按文本相似匹配工作记忆里含这段原话的行，供删除联动提示。
 
+        相似口径见 `scoring.quote_matches`（去标点互相包含，或二元组相似度 ≥ 0.6），
+        不是字面相等：可能命中相近但不是同一条的行，所以面板删前要列预览。
         只做提示不做删除：工作记忆行和记忆条没有关联字段，靠文本比对是唯一
         不建新列的做法，所以宁可少报（短于 4 字不匹配）也不错删。
         """

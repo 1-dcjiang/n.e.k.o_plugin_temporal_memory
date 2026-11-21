@@ -21,10 +21,17 @@ LOCALES = {'zh-CN': ROOT / 'i18n' / 'zh-CN.json', 'en': ROOT / 'i18n' / 'en.json
 class BadStore:
     db_path = 'bad.db'
 
-    def _boom(self):
+    def stats(self):
         raise RuntimeError('disk I/O error')
 
-    stats = recent_turns = pending_conflicts = orphan_pending = staticmethod(_boom)
+    def recent_turns(self, n):
+        raise RuntimeError('disk I/O error')
+
+    def pending_conflicts(self):
+        raise RuntimeError('disk I/O error')
+
+    def orphan_pending(self, n):
+        raise RuntimeError('disk I/O error')
 
 
 class BadEngine:

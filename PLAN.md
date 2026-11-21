@@ -302,3 +302,13 @@
 - `_maintenance_errors` 进快照与 `status`，启动 `report_status` 一并带出；面板状态卡加 `ui.status.read_errors` / `ui.status.maintenance_errors` 两条警告（两 locale 各 195 键）。
 - `secure_delete` 口径：README/guide 改“释放的数据库页擦拭为零”，补 WAL、导出 JSON、`*.migrated` 备份、磁盘快照的明文边界；删除路径不变（实测未复现 FTS 词条残留）。
 - 版本 0.5.16，测试数 222 项（221 passed + 1 skipped）/ 216 个 `def test_`。
+
+## 33. A1358 复核轻项（0.5.17）
+
+- 0 行口径：`recent_turns` 改 `max(0, int(limit))`，`engine.export` 不再把 `working_window=0` 兜成 8，`_settings_snapshot` 在窗口 0 时给空工作记忆；面板、导出、快照三处一致。
+- 文案与实现对齐：`delete_memory` / `delete_working_turn` 坏库报「目标记忆库打不开（库名），未删除」，删掉「已跳过；其余库没有」的旧说法。
+- 命中行定位：`working_memory_hits` 的 `character` 改传入参值，不再读 `get_owner()`（owner 空且非默认库时会指错库），顺带省一次查询。
+- 并发遍历：`_settings_snapshot`、`_aggregate_stats`、`_unloaded_databases` 先 `list(...)` 再遍历，规避 `dictionary changed size during iteration`。
+- 回滚完整性：快照保存/回滚 `orphan_truncated` / `archived_truncated`；维护错误提示改「最近一次维护失败…总开关关闭期间不会重试」。
+- 夹具与旧话：`BadStore` 四个普通方法各自抛 `RuntimeError`；`workmem_hits` docstring、`_connect` secure_delete 注释、README 保留行数、`ui.strategy.toggle_label` 一并清理。
+- 版本 0.5.17，测试数 229 项（228 passed + 1 skipped）/ 223 个 `def test_`。

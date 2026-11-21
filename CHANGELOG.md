@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.17
+
+A1358（对 0.5.16 的安全性与记忆影响复核）结论是「可以发布、无阻断项」，新列的 8 条全部为轻项，本版逐条收口：
+
+- 窗口为 0 时如实显示 0 行：`memory_store.recent_turns` 改 `max(0, int(limit))`（`LIMIT 0` 返回空表），`engine.export` 不再把 `working_window=0` 兜底成 8，`_settings_snapshot` 在 `window <= 0` 时直接给空工作记忆，面板、导出、状态快照三处口径一致。
+- 报错文案与实现对齐：`delete_memory` / `delete_working_turn` 目标库打不开时改报「目标记忆库打不开（库名），未删除」，不再出现「已跳过；其余库没有这条记忆」这种与收紧后行为相反的描述。
+- 「一起删除」命中行改按入参 `character` 标注：原先取 `store.get_owner()`，owner 为空而操作的是非默认库时会把命中行指到默认库同名 id；现在直接用调用方给的库名，并去掉这次多余的 owner 查询。
+- 遍历前先拷贝引擎表：`_settings_snapshot`、`_aggregate_stats`、`_unloaded_databases` 改 `list(self._engines.items())` / `list(self._engines.values())`，避免工作线程遍历时事件循环首次加载新库触发 `dictionary changed size during iteration`。
+- 回滚标志补齐：`_settings_snapshot` 保存并回滚 `orphan_truncated` / `archived_truncated`，坏库不再让这两个计数停在半截值。
+- 维护错误说明写实：`ui.status.maintenance_errors` 中英文改为「最近一次维护失败…总开关关闭期间不会重试」，避免总开关关闭期间旧警告被读成“正在重试”。
+- 测试夹具修正：`tests/test_aggregate_resilience.py` 的 `BadStore` 原先把带 `self` 的 `_boom` 包成 `staticmethod`，实际抛 `TypeError` 而不是预期的 `RuntimeError`；改成四个普通方法各自抛 `RuntimeError`，坏库路径现在真的被覆盖。
+- 文档旧话清理：`memory_store.py` 的 `workmem_hits` docstring 改相似匹配口径（去标点互相包含或二元组相似度 ≥0.6，短于 4 字不匹配），`_connect` 注释改「释放的数据库页擦拭为零，WAL 旧页与导出/备份副本仍是明文」，README 的 `working_window` 说明改「工作记忆保留行数（两行约一轮，0 表示不保留）」，总开关标签改「启用记忆写入与召回」。
+- 测试新增 7 项（`tests/test_review_a1358.py`）：`recent_turns(0)` 空表、窗口 0 的导出与快照、两处打不开报错文案、命中行 `character` 跟随入参、刷新遇到新挂载库不崩。
+- 版本 0.5.17，测试数 229 项（228 passed + 1 skipped）/ 223 个 `def test_`。
+
 ## 0.5.16
 
 补 0.5.15 changelog 之外被点出的两处读取路径问题，并把 `secure_delete` 的口径收窄：
