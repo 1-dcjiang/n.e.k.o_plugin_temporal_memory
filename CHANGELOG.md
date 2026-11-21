@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.14
+
+A1348 上架审查（纯静态、覆盖约四成代码）的三条必改项，结论是「改完再上」：
+
+- 说清 `observe` 的真实依赖：README 新增「使用前提（必读）」，写明写入靠模型每轮主动调用、**覆盖率不保证**、原话证据由模型提交且宿主不逐字校验、对话原文以明文存在插件私有目录、召回是拉取式；`plugin.toml` 的 `description` / `short_description` 与 `i18n` 的 `plugin.description` / `plugin.short_description`、`entry.observe.description` 同步补齐，市场页就能看到而不是只在 README 里。
+- 面板文案全部走 i18n：`ui/settings.tsx` 里 150 个 `ui.*` key 全部改为 `props.t(key)`，不再硬编码中文；`i18n/zh-CN.json` 与 `en.json` 键集完全同构（各 192 键，含插值参数），并把先前缺的 6 个入口（`delete_memory`、`clear_memories`、`delete_working_turn`、`resolve_orphan`、`purge_memories`、`update_settings`）补上名称与描述。
+- `maintenance` 容错：`on_startup` 与 `on_maintenance_timer` 的逐库维护改走 `_run_maintenance`，单库抛异常只记 `logger.warning` 并写进 `_maintenance_errors`，启动不再失败、定时器继续维护其他库；库恢复后再跑一次会自动清掉错误记录。
+- 测试新增 11 项（`tests/test_market_readiness.py`）：启动/定时器遇到坏库仍返回正常、错误记录可清除、两个 locale 键集同构且无空值、面板引用的 key 全部有译文且无死键、面板除注释外无硬编码中文、插件描述与 README 含必要声明。
+- 版本 0.5.14，测试数 205 项 / 199 个 `def test_`。
+
 ## 0.5.13
 
 按「不加列、不改启动架构」的思路处理上轮遗留的边界项：

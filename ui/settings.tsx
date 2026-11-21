@@ -105,35 +105,43 @@ type MemoryState = {
   }
 }
 
+// 文案一律走 i18n：这里只存 key，渲染时用 props.t 取当前语言。
 const NUMERIC_FIELDS: Array<{
   key: keyof MemoryConfig
   label: string
   help: string
 }> = [
-  { key: "working_window", label: "工作记忆行数", help: "保留最近多少行原文；用户与助手各占一行，8 行约 4 轮对话。只影响本插件私有库。" },
-  { key: "anchor_threshold", label: "建锚点阈值 (0~1)", help: "越高越稀疏，只留大事。" },
-  { key: "max_anchor_summary_chars", label: "摘要字符上限", help: "摘要可以截断，原话证据不受这个上限影响。" },
-  { key: "hot_recall_window_days", label: "hot 观察窗（天）", help: "多久内被召回算热点。" },
-  { key: "cold_after_days", label: "cold 冷却期（天）", help: "多久没被召回降为冷层。" },
-  { key: "dormancy_event_days", label: "事件自动休眠（天）", help: "事件超过这么多天没被确认，自动休眠；固定条目不参与。" },
-  { key: "dormancy_preference_days", label: "偏好/事实自动休眠（天）", help: "偏好、事实、决定超过这么多天没被确认，自动休眠；固定条目不参与。" },
-  { key: "max_recall_anchors", label: "召回锚点上限", help: "单次召回最多带几个锚点及其邻接。" },
-  { key: "max_recall_semantics", label: "召回语义上限", help: "单次召回最多带几条偏好/事实。" },
-  { key: "recall_char_budget", label: "召回字符预算", help: "按需召回拼给模型的字符硬上限。" },
+  { key: "working_window", label: "ui.field.working_window.label", help: "ui.field.working_window.help" },
+  { key: "anchor_threshold", label: "ui.field.anchor_threshold.label", help: "ui.field.anchor_threshold.help" },
+  { key: "max_anchor_summary_chars", label: "ui.field.max_anchor_summary_chars.label", help: "ui.field.max_anchor_summary_chars.help" },
+  { key: "hot_recall_window_days", label: "ui.field.hot_recall_window_days.label", help: "ui.field.hot_recall_window_days.help" },
+  { key: "cold_after_days", label: "ui.field.cold_after_days.label", help: "ui.field.cold_after_days.help" },
+  { key: "dormancy_event_days", label: "ui.field.dormancy_event_days.label", help: "ui.field.dormancy_event_days.help" },
+  { key: "dormancy_preference_days", label: "ui.field.dormancy_preference_days.label", help: "ui.field.dormancy_preference_days.help" },
+  { key: "max_recall_anchors", label: "ui.field.max_recall_anchors.label", help: "ui.field.max_recall_anchors.help" },
+  { key: "max_recall_semantics", label: "ui.field.max_recall_semantics.label", help: "ui.field.max_recall_semantics.help" },
+  { key: "recall_char_budget", label: "ui.field.recall_char_budget.label", help: "ui.field.recall_char_budget.help" },
 ]
 
-const STATUS_LABEL: Record<string, string> = {
-  active: "有效",
-  dormant: "休眠",
-  pending: "待确认",
-  archived: "已移除",
+const STATUS_LABEL_KEY: Record<string, string> = {  active: "ui.status.active",
+  dormant: "ui.status.dormant",
+  pending: "ui.status.pending",
+  archived: "ui.status.archived",
 }
 
-const KIND_LABEL: Record<string, string> = {
-  event: "事件",
-  preference: "偏好",
-  decision: "决定",
-  fact: "事实",
+const KIND_LABEL_KEY: Record<string, string> = {
+  event: "ui.kind.event",
+  preference: "ui.kind.preference",
+  decision: "ui.kind.decision",
+  fact: "ui.kind.fact",
+}
+
+// 助手角色在历史数据里既可能是英文 role，也可能是中文值；用转义避免面板出现硬编码中文。
+const ASSISTANT_ROLE = "assistant"
+const ASSISTANT_ROLE_LEGACY = "\u52a9\u624b"
+
+function isAssistantRole(role?: string): boolean {
+  return role === ASSISTANT_ROLE || role === ASSISTANT_ROLE_LEGACY
 }
 
 function statusTone(status?: string): "success" | "warning" | "danger" {
@@ -151,6 +159,8 @@ function shortTime(item: MemoryItem): string {
 export default function TemporalMemorySettings(
   props: PluginSurfaceProps<MemoryState>,
 ) {
+  const t = (key: string, params?: Record<string, any>): string =>
+    props.t ? props.t(key, params) : key
   const config = props.state?.config || {}
   const capacity = props.state?.capacity || {}
   const stats = props.state?.status?.stats || {}
@@ -198,7 +208,7 @@ export default function TemporalMemorySettings(
       if (raw === "") continue
       const parsed = Number(raw)
       if (!Number.isFinite(parsed)) {
-        throw new Error(`${field.label} 需要是数字`)
+        throw new Error(t("ui.errors.numeric_field", { field: t(field.label) }))
       }
       payload[field.key] = parsed
     }
@@ -216,15 +226,19 @@ export default function TemporalMemorySettings(
       const result: any = await props.api.call(action, args)
       payload = result?.value ?? result?.data ?? result
     } catch (error) {
-      setNotice(`${label}失败：${error instanceof Error ? error.message : String(error)}`)
+      setNotice(t("ui.notice.action_failed", {
+        label,
+        message: error instanceof Error ? error.message : String(error),
+      }))
       return null
     }
     if (payload && payload.ok === false) {
       // 清空/清理是跨库操作：单个库失败时后端返回 ok=false + failed 计数
       const failed = Number(payload.failed ?? 0)
-      setNotice(
-        `${label}没有全部成功${failed > 0 ? `（${failed} 个库失败）` : ""}；失败的库原样保留，详见插件日志。`,
-      )
+      setNotice(t("ui.notice.action_partial", {
+        label,
+        detail: failed > 0 ? t("ui.notice.action_partial_detail", { failed }) : "",
+      }))
     } else {
       setNotice("")
     }
@@ -265,28 +279,30 @@ export default function TemporalMemorySettings(
 
   async function purgeOld() {
     const accepted = await confirm({
-      title: "清理旧记忆",
-      message:
-        "将永久删除所有已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天的未固定记忆。此操作不可撤销，建议先导出 JSON。",
+      title: t("ui.confirm.purge_title"),
+      message: t("ui.confirm.purge_message"),
       tone: "danger",
-      confirmLabel: "永久删除",
-      cancelLabel: "取消",
+      confirmLabel: t("ui.common.delete_forever"),
+      cancelLabel: t("ui.common.cancel"),
     })
     if (!accepted) return
-    const result = await act("purge_memories", {}, "清理旧记忆")
+    const result = await act("purge_memories", {}, t("ui.action.purge"))
     if (result?.ok) {
-      setNotice(`已清理 ${result.total ?? 0} 条旧记忆（锚点 ${result.anchors ?? 0}、偏好/事实 ${result.semantics ?? 0}）。`)
+      setNotice(t("ui.notice.purge_done", {
+        total: result.total ?? 0,
+        anchors: result.anchors ?? 0,
+        semantics: result.semantics ?? 0,
+      }))
     }
   }
 
   async function deleteWorkingTurn(turn: WorkingTurn) {
     const accepted = await confirm({
-      title: "永久删除这条工作记忆",
-      message:
-        "会立即从工作记忆里删掉这条原话，不受窗口滚动限制。此操作不可撤销。",
+      title: t("ui.confirm.working_title"),
+      message: t("ui.confirm.working_message"),
       tone: "danger",
-      confirmLabel: "永久删除",
-      cancelLabel: "取消",
+      confirmLabel: t("ui.common.delete_forever"),
+      cancelLabel: t("ui.common.cancel"),
     })
     if (!accepted) return
     await act(
@@ -296,18 +312,17 @@ export default function TemporalMemorySettings(
         character: turn.character ?? "",
         confirmed: true,
       },
-      "删除工作记忆",
+      t("ui.action.delete_working_turn"),
     )
   }
 
   async function deleteForever(item: MemoryItem) {
     const accepted = await confirm({
-      title: "永久删除这条记忆",
-      message:
-        "会立即删除这条记忆、关联和撤销快照，不受 30 天清理等待限制。此操作不可撤销，建议先导出 JSON。",
+      title: t("ui.confirm.memory_title"),
+      message: t("ui.confirm.memory_message"),
       tone: "danger",
-      confirmLabel: "永久删除",
-      cancelLabel: "取消",
+      confirmLabel: t("ui.common.delete_forever"),
+      cancelLabel: t("ui.common.cancel"),
     })
     if (!accepted) return
     const payload: Record<string, unknown> = {
@@ -316,20 +331,18 @@ export default function TemporalMemorySettings(
       confirmed: true,
     }
     if (item.character !== undefined) payload.character = item.character
-    const result = await act("delete_memory", payload, "永久删除")
+    const result = await act("delete_memory", payload, t("ui.action.delete_forever"))
     const hits = (result?.working_memory_hits ?? []) as WorkingTurn[]
     if (!hits || hits.length === 0) return
     const alsoDelete = await confirm({
-      title: "工作记忆里还有这句原话",
-      message: `删除记忆条不会删原话：工作记忆里还有 ${hits.length} 行含这句。要一起永久删除这些行吗？`,
+      title: t("ui.confirm.working_hits_title"),
+      message: t("ui.confirm.working_hits_message", { count: hits.length }),
       tone: "danger",
-      confirmLabel: "一起删除",
-      cancelLabel: "先留着",
+      confirmLabel: t("ui.confirm.delete_together"),
+      cancelLabel: t("ui.confirm.keep_for_now"),
     })
     if (!alsoDelete) {
-      setNotice(
-        `记忆条已删除；工作记忆里还有 ${hits.length} 行含这句原话，可在「工作记忆」里单独删除。`,
-      )
+      setNotice(t("ui.notice.memory_deleted_hits", { count: hits.length }))
       return
     }
     let removed = 0
@@ -345,35 +358,37 @@ export default function TemporalMemorySettings(
         // 单行删失败不影响其余行；最后统一提示成功数
       }
     }
-    setNotice(`记忆条已删除，并一并删掉 ${removed} / ${hits.length} 行工作记忆。`)
+    setNotice(t("ui.notice.memory_deleted_with_hits", { removed, total: hits.length }))
     await props.api.refresh()
   }
 
   async function clearAll() {
     const first = await confirm({
-      title: "清空全部记忆",
-      message:
-        "将永久删除所有角色库的记忆、工作记忆、关联和撤销快照，并一并删掉迁移留下的 *.migrated 旧库备份；清空后执行 VACUUM 回收文件。此操作不可撤销。",
+      title: t("ui.confirm.clear_title"),
+      message: t("ui.confirm.clear_message"),
       tone: "danger",
-      confirmLabel: "继续",
-      cancelLabel: "取消",
+      confirmLabel: t("ui.common.continue"),
+      cancelLabel: t("ui.common.cancel"),
     })
     if (!first) return
     const second = await confirm({
-      title: "最后确认",
-      message: "清空后无法恢复，也没有撤销记录。确定要继续吗？",
+      title: t("ui.confirm.clear_final_title"),
+      message: t("ui.confirm.clear_final_message"),
       tone: "danger",
-      confirmLabel: "清空全部",
-      cancelLabel: "取消",
+      confirmLabel: t("ui.common.clear_all"),
+      cancelLabel: t("ui.common.cancel"),
     })
     if (!second) return
-    const result = await act("clear_memories", { confirmed: true }, "清空全部记忆")
+    const result = await act("clear_memories", { confirmed: true }, t("ui.action.clear_all"))
     if (result?.ok) {
       const reclaimed =
-        result.reclaimed === false ? "；磁盘未回收（文件仍占空间，详见插件日志）" : ""
-      setNotice(
-        `已清空 ${result.databases ?? 0} 个库：记忆 ${(result.anchors ?? 0) + (result.semantics ?? 0)} 条、工作记忆 ${result.working_turns ?? 0} 行${reclaimed}。`,
-      )
+        result.reclaimed === false ? t("ui.notice.clear_not_reclaimed") : ""
+      setNotice(t("ui.notice.clear_done", {
+        databases: result.databases ?? 0,
+        memories: (result.anchors ?? 0) + (result.semantics ?? 0),
+        turns: result.working_turns ?? 0,
+        detail: reclaimed,
+      }))
     }
   }
 
@@ -385,36 +400,36 @@ export default function TemporalMemorySettings(
   )
 
   return (
-    <Page title="时序记忆" subtitle="原话证据 + 到期休眠 + 矛盾待确认，不自动注入对话">
+    <Page title={t("ui.title")} subtitle={t("ui.subtitle")}>
       <Stack>
         {notice && (
           <Alert tone="warning">{notice}</Alert>
         )}
-        <Card title="记忆状态">
+        <Card title={t("ui.status.title")}>
           <Stack>
             {props.state?.status?.legacy_ignored && (
               <Alert tone="warning">
-                检测到旧的 memory.db 与角色库并存：当前只挂载角色库，旧库没有载入，也不会出现在下面列表里。
+                {t("ui.status.legacy_ignored")}
               </Alert>
             )}
             {(props.state?.status?.stats?.unique_index_skipped?.length ?? 0) > 0 && (
               <Alert tone="warning">
-                旧库存在重复事件行，唯一索引未能建立；新写入仍会前置查重，但建议导出后清理重复条目。
+                {t("ui.status.unique_index_skipped")}
               </Alert>
             )}
             <Inline align="center" justify="space-between">
-              <Text>运行状态</Text>
+              <Text>{t("ui.status.running_label")}</Text>
               <StatusBadge
                 tone={props.state?.status?.ready ? "success" : "warning"}
-                label={props.state?.status?.ready ? "运行中" : "未就绪"}
+                label={props.state?.status?.ready ? t("ui.status.running") : t("ui.status.not_ready")}
               />
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>锚点 / 偏好事实 / 关联边</Text>
+              <Text>{t("ui.status.counts_label")}</Text>
               <Text>{stats.anchors ?? 0} / {stats.semantics ?? 0} / {stats.edges ?? 0}</Text>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>有效 / 休眠 / 待确认 / 已移除</Text>
+              <Text>{t("ui.status.state_counts_label")}</Text>
               <Text>
                 {statuses.active ?? 0} / {statuses.dormant ?? 0} / {statuses.pending ?? 0} / {statuses.archived ?? 0}
               </Text>
@@ -422,68 +437,77 @@ export default function TemporalMemorySettings(
             {(statuses.pending ?? 0) > 0 && (
               <Alert tone="warning">
                 {pendingOverdue > 0
-                  ? `有 ${pendingOverdue} 条待确认已经等了超过 ${pendingAlertDays} 天（最早一条 ${pendingOldestDays} 天），处理前两边说法都不会进入召回，建议尽快在下面选一条。`
-                  : `还有 ${statuses.pending} 条待确认，处理前这些说法不会进入召回。`}
+                  ? t("ui.status.pending_overdue", {
+                    overdue: pendingOverdue,
+                    days: pendingAlertDays,
+                    oldest: pendingOldestDays,
+                  })
+                  : t("ui.status.pending_notice", { count: statuses.pending ?? 0 })}
               </Alert>
             )}
             <Inline align="center" justify="space-between">
-              <Text>单库最高占用（有效 + 待确认）</Text>
+              <Text>{t("ui.status.occupancy_label")}</Text>
               <Text>{stats.max_role_used ?? 0} / {capacity.per_role ?? 5000}</Text>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>hot / warm / cold</Text>
+              <Text>{t("ui.status.tiers")}</Text>
               <Text>{tiers.hot ?? 0} / {tiers.warm ?? 0} / {tiers.cold ?? 0}</Text>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>待处理矛盾组</Text>
+              <Text>{t("ui.status.conflict_groups_label")}</Text>
               <Text>{stats.pending_conflicts ?? 0}</Text>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>检索模式</Text>
+              <Text>{t("ui.status.fts_label")}</Text>
               <Text>{stats.fts_mode || "unknown"}</Text>
             </Inline>
           </Stack>
         </Card>
 
-        <Card title="召回方式">
+        <Card title={t("ui.recall.title")}>
           <Stack>
             <Alert tone="info">
-              本插件不调用 push_message，不会主动把记忆推送到对话。
-              只有用户明确问到过去、模型调用召回工具时，才返回有效条目正文；面板预览只为查看，不计入召回。
+              {t("ui.recall.hint")}
             </Alert>
           </Stack>
         </Card>
 
         {unloaded.length > 0 && (
-          <Card title="未加载的角色库">
+          <Card title={t("ui.unloaded.title")}>
             <Stack>
               <Alert tone="info">
-                {`磁盘上还有 ${unloaded.length} 个库没有挂载：它们不参与召回，也不在上面列表里。下面只是只读快照（最多 30 秒延迟），不会改动文件；要处理里面的条目就点「载入这个库」。`}
+                {t("ui.unloaded.hint", { count: unloaded.length })}
               </Alert>
               {unloaded.map((db) => (
                 <Card
                   key={db.path}
-                  title={`${db.character || "（库里没有角色标记）"}｜${db.name || ""}`}
+                  title={`${db.character || t("ui.unloaded.no_character")} | ${db.name || ""}`}
                 >
                   <Stack>
                     <Text>
-                      {`锚点 ${db.anchors ?? 0}｜偏好/事实 ${db.semantics ?? 0}｜待确认 ${db.pending ?? 0}（${db.conflict_groups ?? 0} 组冲突）｜工作记忆 ${db.working_turns ?? 0} 行`}
+                      {t("ui.unloaded.counts", {
+                        anchors: db.anchors ?? 0,
+                        semantics: db.semantics ?? 0,
+                        pending: db.pending ?? 0,
+                        groups: db.conflict_groups ?? 0,
+                        turns: db.working_turns ?? 0,
+                      })}
                     </Text>
                     <Text>
                       {db.ok === false
-                        ? `读取失败：${db.error || "未知原因"}`
+                        ? t("ui.unloaded.read_failed", { error: db.error || t("ui.common.unknown_reason") })
                         : db.last_activity
-                          ? `最后写入：${new Date(db.last_activity * 1000).toLocaleString()}`
-                          : "这个库还没有锚点"}
+                          ? t("ui.unloaded.last_activity", { time: new Date(db.last_activity * 1000).toLocaleString() })
+                          : t("ui.unloaded.empty")}
                     </Text>
                     <Inline align="center" justify="space-between">
-                      <Text>{`文件 ${db.name || ""}`}</Text>
+                      <Text>{t("ui.unloaded.file", { name: db.name || "" })}</Text>
                       {db.ok !== false && (
                         <Button
                           tone="default"
-                          onClick={() => act("attach_database", { path: db.path }, "载入角色库")}
+                          onClick={() => act("attach_database", { path: db.path }, t("ui.action.attach_database"))}
                         >
-                          载入这个库
+                          {t("ui.unloaded.attach")}
                         </Button>
                       )}
                     </Inline>
@@ -495,14 +519,14 @@ export default function TemporalMemorySettings(
         )}
 
         {conflictGroups.length > 0 && (
-          <Card title="待确认矛盾">
+          <Card title={t("ui.conflict.title")}>
             <Stack>
               <Alert tone="warning">
-                新旧说法冲突时两边都会暂停召回。选一条采用，另一条归档；选错可撤销。
+                {t("ui.conflict.hint")}
               </Alert>
               {conflictsTruncated && (
                 <Alert tone="warning">
-                  冲突组超过 120 组，这里只显示前 120 组；处理后会继续露出后面的组。
+                  {t("ui.conflict.truncated")}
                 </Alert>
               )}
               {conflictGroups.map((key) => {
@@ -512,16 +536,22 @@ export default function TemporalMemorySettings(
                 if (!first) return null
                 return (
                   <Stack key={key}>
-                    <Text>{`冲突组 ${first.conflict_group}${first.character ? `｜${first.character}` : ""}`}</Text>
+                    <Text>{t("ui.conflict.group_label", {
+                      group: first.conflict_group ?? "",
+                      character: first.character ? t("ui.conflict.group_character", { character: first.character }) : "",
+                    })}</Text>
                     {conflicts
                       .filter((item) => `${item.character ?? ""}\u0000${item.conflict_group ?? ""}` === key)
                       .map((item) => (
-                        <Card key={item.id} title={`${KIND_LABEL[item.kind || ""] || item.kind}｜${shortTime(item)}`}>
+                        <Card
+                          key={item.id}
+                          title={`${t(KIND_LABEL_KEY[item.kind || ""] || "ui.common.memory")} | ${shortTime(item)}`}
+                        >
                           <Stack>
                             <Text>{item.text}</Text>
-                            <Text>{`原话：${item.quote || "（缺失）"}`}</Text>
+                            <Text>{t("ui.memory.quote_label", { quote: item.quote || t("ui.common.missing") })}</Text>
                             <Inline align="center" justify="space-between">
-                              <StatusBadge tone={statusTone(item.status)} label="待确认" />
+                              <StatusBadge tone={statusTone(item.status)} label={t("ui.status.pending")} />
                               <Button
                                 tone="primary"
                                 onClick={() => act("resolve_conflict", {
@@ -530,7 +560,7 @@ export default function TemporalMemorySettings(
                                   character: first.character ?? "",
                                 })}
                               >
-                                采用这条
+                                {t("ui.memory.adopt")}
                               </Button>
                             </Inline>
                           </Stack>
@@ -544,35 +574,38 @@ export default function TemporalMemorySettings(
         )}
 
         {orphanPending.length > 0 && (
-          <Card title="未分组待确认">            <Stack>
+          <Card title={t("ui.orphan.title")}>
+            <Stack>
               <Alert tone="warning">
-                这些条目没有冲突组，但仍占用容量且不会正常召回。保留会转为有效记忆，归档会移出召回。
-                已固定的旧说法被新说法反驳时，旧条仍然有效并继续召回，新说法会出现在这里；处理这里不会改动已固定的旧条。
+                {t("ui.orphan.hint")}
               </Alert>
               {orphanPendingTruncated && (
                 <Alert tone="warning">
-                  未分组条目超过 120 条，这里只显示最早的 120 条；处理后会露出后面的条目。
+                  {t("ui.orphan.truncated")}
                 </Alert>
               )}
               {orphanPending.map((item) => (
-                <Card key={`${item.table}:${item.id}`} title={`${KIND_LABEL[item.kind || ""] || item.kind}｜${shortTime(item)}`}>
+                <Card
+                  key={`${item.table}:${item.id}`}
+                  title={`${t(KIND_LABEL_KEY[item.kind || ""] || "ui.common.memory")} | ${shortTime(item)}`}
+                >
                   <Stack>
                     <Text>{item.text}</Text>
-                    <Text>{`原话：${item.quote || "（缺失）"}`}</Text>
+                    <Text>{t("ui.memory.quote_label", { quote: item.quote || t("ui.common.missing") })}</Text>
                     <Inline align="center" justify="space-between">
-                      <StatusBadge tone={statusTone(item.status)} label="待确认" />
+                      <StatusBadge tone={statusTone(item.status)} label={t("ui.status.pending")} />
                       <Inline>
                         <Button
                           tone="primary"
                           onClick={() => act("resolve_orphan", { table: item.table, id: item.id, keep: true })}
                         >
-                          保留这条
+                          {t("ui.orphan.keep")}
                         </Button>
                         <Button
                           tone="danger"
                           onClick={() => act("resolve_orphan", { table: item.table, id: item.id, keep: false })}
                         >
-                          归档这条
+                          {t("ui.orphan.archive")}
                         </Button>
                       </Inline>
                     </Inline>
@@ -584,22 +617,24 @@ export default function TemporalMemorySettings(
         )}
 
         {workingMemory.length > 0 && (
-          <Card title="工作记忆（最近对话原文）">
+          <Card title={t("ui.working.title")}>
             <Stack>
               <Alert tone="info">
-                {`这里显示每个角色最近 ${workingWindow} 行原文（用户、助手各一行，约 ${Math.ceil(workingWindow / 2)} 轮对话）；内容会以明文保存在插件私有 sqlite，也会出现在导出 JSON 里。`}
-                窗口只按行数滚动，行数不等于轮数；原话由模型每轮传入，插件无法逐字核对宿主聊天记录，发现可疑内容请永久删除。
+                {t("ui.working.hint", {
+                  window: workingWindow,
+                  turns: Math.ceil(workingWindow / 2),
+                })}
               </Alert>
               {workingMemory.slice(0, 40).map((turn, index) => (
                 <Card
                   key={`${turn.character || ""}:${turn.id ?? index}`}
-                  title={`${(turn.role === "assistant" || turn.role === "助手") ? "助手" : "用户"}｜${turn.ts ? new Date(turn.ts * 1000).toLocaleString() : ""}${turn.character ? `｜${turn.character}` : ""}`}
+                  title={`${isAssistantRole(turn.role) ? t("ui.working.role_assistant") : t("ui.working.role_user")} | ${turn.ts ? new Date(turn.ts * 1000).toLocaleString() : ""}${turn.character ? ` | ${turn.character}` : ""}`}
                 >
                   <Stack>
                     <Text>{turn.content || ""}</Text>
                     <Inline align="center" justify="end">
                       <Button tone="danger" onClick={() => deleteWorkingTurn(turn)}>
-                        永久删除这条
+                        {t("ui.working.delete")}
                       </Button>
                     </Inline>
                   </Stack>
@@ -609,46 +644,62 @@ export default function TemporalMemorySettings(
           </Card>
         )}
 
-        <Card title="记忆与证据">
+        <Card title={t("ui.memory.title")}>
           <Stack>
             <Alert tone="info">
-              每条都能看到原话、来源和剩余休眠天数。纠正/固定/移除都会留撤销记录。
-              召回只增加召回计数，不会刷新「最后确认时间」：只有你在面板确认或模型重新确认，休眠倒计时才会重置。
+              {t("ui.memory.hint")}
             </Alert>
             {memoriesTruncated && (
               <Alert tone="warning">
-                固定条目优先，其余按时间显示，这里最多显示 240 条。固定条目不会被自动清理；取消固定或处理已显示条目后，更早的条目会继续出现在列表里。
+                {t("ui.memory.truncated")}
               </Alert>
             )}
-            {visible.length === 0 && <Text>还没有记忆。开启写入并聊几轮后会出现在这里。</Text>}
+            {visible.length === 0 && <Text>{t("ui.memory.empty")}</Text>}
             {visible.map((item) => {
               const key = `${item.table}:${item.id}`
               return (
-                <Card key={key} title={`${KIND_LABEL[item.kind || ""] || item.kind || "记忆"}｜${shortTime(item)}`}>
+                <Card
+                  key={key}
+                  title={`${t(KIND_LABEL_KEY[item.kind || ""] || "ui.common.memory")} | ${shortTime(item)}`}
+                >
                   <Stack>
                     <Inline align="center" justify="space-between">
                       <Text>{item.text}</Text>
                       <StatusBadge
                         tone={statusTone(item.status)}
-                        label={STATUS_LABEL[item.status || ""] || item.status || ""}
+                        label={t(STATUS_LABEL_KEY[item.status || ""] || "ui.common.unknown")}
                       />
                     </Inline>
                     <Inline align="center" justify="space-between">
-                      <Text>{`分数 ${item.effective_score ?? item.score ?? 0}｜${item.pinned ? "已固定，不衰减" : `约 ${item.next_sleep_days ?? "?"} 天后休眠`}`}</Text>
-                      <Text>{item.character ? `角色 ${item.character}` : ""}</Text>
+                      <Text>
+                        {item.pinned
+                          ? t("ui.memory.pinned_score", { score: item.effective_score ?? item.score ?? 0 })
+                          : t("ui.memory.sleeping_score", {
+                            score: item.effective_score ?? item.score ?? 0,
+                            days: item.next_sleep_days ?? "?",
+                          })}
+                      </Text>
+                      <Text>{item.character ? t("ui.memory.character", { character: item.character }) : ""}</Text>
                     </Inline>
                     <Button
                       tone="default"
                       onClick={() => { setOpenId(openId === key ? "" : key) }}
                     >
-                      {openId === key ? "收起原话" : "查看原话证据"}
+                      {openId === key ? t("ui.memory.hide_quote") : t("ui.memory.quote")}
                     </Button>
                     {openId === key && (
                       <Stack>
-                        <Text>{`原话：${item.quote || "（缺失，不会进入召回）"}`}</Text>
-                        <Text>{`来源：${item.source_kind || "未知"}${item.source_event_id ? `｜事件 ${item.source_event_id}` : ""}`}</Text>
+                        <Text>{t("ui.memory.quote_label", {
+                          quote: item.quote || t("ui.memory.quote_missing_no_recall"),
+                        })}</Text>
+                        <Text>{t("ui.memory.source", {
+                          kind: item.source_kind || t("ui.common.unknown"),
+                          event: item.source_event_id
+                            ? t("ui.memory.source_event", { id: item.source_event_id })
+                            : "",
+                        })}</Text>
                         <Button tone="danger" onClick={() => deleteForever(item)}>
-                          永久删除这条（不可撤销）
+                          {t("ui.memory.delete_forever")}
                         </Button>
                       </Stack>
                     )}
@@ -657,7 +708,7 @@ export default function TemporalMemorySettings(
                         tone="success"
                         onClick={() => act("confirm_memory", { table: item.table, id: item.id })}
                       >
-                        确认有效
+                        {t("ui.memory.confirm")}
                       </Button>
                       <Button
                         tone="default"
@@ -667,45 +718,45 @@ export default function TemporalMemorySettings(
                           pinned: !item.pinned,
                         })}
                       >
-                        {item.pinned ? "取消固定" : "手动保留"}
+                        {item.pinned ? t("ui.memory.unpin") : t("ui.memory.pin")}
                       </Button>
                       <Button tone="default" onClick={() => { startCorrection(item) }}>
-                        纠正
+                        {t("ui.memory.correct")}
                       </Button>
                       <Button
                         tone="danger"
                         onClick={() => act("archive_memory", { table: item.table, id: item.id })}
                       >
-                        移除
+                        {t("ui.memory.remove")}
                       </Button>
                     </Inline>
                     {editId === key && (
                       <Stack>
-                        <Field label="摘要/内容">
+                        <Field label={t("ui.memory.text_field")}>
                           <Input value={editText} onChange={(value: string) => { setEditText(value) }} />
                         </Field>
-                        <Field label="原话证据（只读）">
-                          <Text>{item.quote || "（缺失）"}</Text>
+                        <Field label={t("ui.memory.quote_field")}>
+                          <Text>{item.quote || t("ui.common.missing")}</Text>
                         </Field>
-                        <Field label="类型">
+                        <Field label={t("ui.memory.kind_field")}>
                           <Inline align="center" justify="space-between">
-                            {Object.entries(KIND_LABEL).map(([kind, label]) => (
+                            {Object.entries(KIND_LABEL_KEY).map(([kind, labelKey]) => (
                               <Button
                                 key={kind}
                                 tone={editKind === kind ? "primary" : "default"}
                                 onClick={() => { setEditKind(kind) }}
                               >
-                                {label}
+                                {t(labelKey)}
                               </Button>
                             ))}
                           </Inline>
                         </Field>
-                        <Field label="标签（逗号分隔）">
+                        <Field label={t("ui.memory.tags_field")}>
                           <Input value={editTags} onChange={(value: string) => { setEditTags(value) }} />
                         </Field>
                         <Inline align="center" justify="space-between">
-                          <Button tone="primary" onClick={() => saveCorrection(item)}>保存纠正</Button>
-                          <Button tone="default" onClick={() => { setEditId("") }}>取消</Button>
+                          <Button tone="primary" onClick={() => saveCorrection(item)}>{t("ui.memory.save_correction")}</Button>
+                          <Button tone="default" onClick={() => { setEditId("") }}>{t("ui.common.cancel")}</Button>
                         </Inline>
                       </Stack>
                     )}
@@ -714,44 +765,46 @@ export default function TemporalMemorySettings(
               )
             })}
             <Alert tone="warning">
-              导出文件是明文 JSON，包含全部记忆与原话证据；只保存在可信位置，不要上传到公开网盘或聊天群。
+              {t("ui.memory.export_warning")}
             </Alert>
             <Inline align="center" justify="space-between">
-              <Button tone="default" onClick={() => act("undo_last", {})}>撤销上一步</Button>
-              <Button tone="default" onClick={exportJson}>导出 JSON</Button>
+              <Button tone="default" onClick={() => act("undo_last", {})}>{t("ui.memory.undo")}</Button>
+              <Button tone="default" onClick={exportJson}>{t("ui.memory.export")}</Button>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>容量吃紧时可清理长期已移除/休眠的旧条目。</Text>
-              <Button tone="default" onClick={purgeOld}>清理旧记忆</Button>
+              <Text>{t("ui.memory.purge_hint")}</Text>
+              <Button tone="default" onClick={purgeOld}>{t("ui.memory.purge")}</Button>
             </Inline>
             <Inline align="center" justify="space-between">
-              <Text>彻底清空所有角色库，立即生效且不可撤销。</Text>
-              <Button tone="danger" onClick={clearAll}>清空全部记忆</Button>
+              <Text>{t("ui.memory.clear_hint")}</Text>
+              <Button tone="danger" onClick={clearAll}>{t("ui.memory.clear")}</Button>
             </Inline>
           </Stack>
         </Card>
 
         {archived.length > 0 && (
-          <Card title="已移除的记忆（可永久删除）">
+          <Card title={t("ui.archived.title")}>
             <Stack>
               <Alert tone="info">
-                这些条目已移出召回，但原话仍以明文保存在插件 sqlite 里，平时不计入召回，也不占容量。
-                想立刻抹掉请点「永久删除这条」；也可以等「清理旧记忆」的 30 天期限。
+                {t("ui.archived.hint")}
               </Alert>
               {archivedTruncated && (
                 <Alert tone="warning">
-                  已移除条目超过 120 条，这里只显示最近的 120 条；删除后会露出更早的条目。
+                  {t("ui.archived.truncated")}
                 </Alert>
               )}
               {archived.map((item) => (
-                <Card key={`${item.character || ""}:${item.table}:${item.id}`} title={`${KIND_LABEL[item.kind || ""] || item.kind || "记忆"}｜${shortTime(item)}`}>
+                <Card
+                  key={`${item.character || ""}:${item.table}:${item.id}`}
+                  title={`${t(KIND_LABEL_KEY[item.kind || ""] || "ui.common.memory")} | ${shortTime(item)}`}
+                >
                   <Stack>
                     <Text>{item.text}</Text>
-                    <Text>{`原话：${item.quote || "（缺失）"}`}</Text>
+                    <Text>{t("ui.memory.quote_label", { quote: item.quote || t("ui.common.missing") })}</Text>
                     <Inline align="center" justify="space-between">
-                      <Text>{item.character ? `角色 ${item.character}` : "默认库"}</Text>
+                      <Text>{item.character ? t("ui.memory.character", { character: item.character }) : t("ui.archived.default_db")}</Text>
                       <Button tone="danger" onClick={() => deleteForever(item)}>
-                        永久删除这条（不可撤销）
+                        {t("ui.memory.delete_forever")}
                       </Button>
                     </Inline>
                   </Stack>
@@ -761,28 +814,28 @@ export default function TemporalMemorySettings(
           </Card>
         )}
 
-        <Card title="写入与生命周期">
+        <Card title={t("ui.strategy.title")}>
           <Stack>
             <Alert tone="info">
-              关闭总开关后不再写入新记忆，也不再接受模型召回；已有记忆仍保留在面板里，可纠正、移除或永久删除。
+              {t("ui.strategy.disabled_hint")}
             </Alert>
-            <Field label="启用记忆写入">
+            <Field label={t("ui.strategy.toggle_label")}>
               <Button tone={enabled ? "default" : "primary"} onClick={() => { setEnabled(!enabled) }}>
-                {enabled ? "已启用，点击停用" : "已停用，点击启用"}
+                {enabled ? t("ui.strategy.enabled_on") : t("ui.strategy.enabled_off")}
               </Button>
             </Field>
             {NUMERIC_FIELDS.map((field) => (
-              <Field key={field.key} label={field.label} help={field.help}>
+              <Field key={field.key} label={t(field.label)} help={t(field.help)}>
                 <Input value={values[field.key] ?? ""} onChange={(value: string) => setValue(field.key, value)} />
               </Field>
             ))}
           </Stack>
         </Card>
 
-        <Card title="保存">
+        <Card title={t("ui.save.title")}>
           <Stack>
-            <Text>改动只写回本插件配置，不影响宿主或其他插件。</Text>
-            <Button tone="primary" onClick={save}>保存设置</Button>
+            <Text>{t("ui.save.hint")}</Text>
+            <Button tone="primary" onClick={save}>{t("ui.save.button")}</Button>
           </Stack>
         </Card>
       </Stack>

@@ -98,6 +98,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         self._init_lock = asyncio.Lock()
         self._write_times: dict[str, list[float]] = {}
         self._engine_errors: dict[str, str] = {}
+        self._maintenance_errors: dict[str, str] = {}
         self._unloaded_cache: tuple[float, list[dict[str, Any]]] | None = None
 
     # ------------------------------------------------------------------ 生命周期
@@ -122,8 +123,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
                     # 没有 owner 的旧库名不带哈希；新库若没写 owner 就不自动猜角色。
                     if name and not re.search(r'-[0-9a-f]{8}$', name):
                         await self._ensure_engine(name)
-        for engine in self._engines.values():
-            await asyncio.to_thread(engine.maintenance)
+        for character, engine in list(self._engines.items()):
+            await self._run_maintenance(character, engine)
         self._ready = True
         self.report_status({'ready': True, 'stats': self._aggregate_stats(),
                             'legacy_ignored': legacy_ignored})
@@ -1072,8 +1073,10 @@ class TemporalMemoryPlugin(NekoPluginBase):
                        'moved': {'hot': 0, 'warm': 0, 'cold': 0}})
         slept = {'anchors': 0, 'semantics': 0}
         moved = {'hot': 0, 'warm': 0, 'cold': 0}
-        for engine in list(self._engines.values()):
-            result = await asyncio.to_thread(engine.maintenance)
+        for character, engine in list(self._engines.items()):
+            result = await self._run_maintenance(character, engine)
+            if not result:
+                continue
             for key, value in (result.get('slept') or {}).items():
                 slept[key] = slept.get(key, 0) + int(value or 0)
             for key, value in (result.get('retier') or {}).items():
@@ -1081,6 +1084,23 @@ class TemporalMemoryPlugin(NekoPluginBase):
         return Ok({'slept': slept, 'moved': moved})
 
     # ------------------------------------------------------------------ 内部
+
+    async def _run_maintenance(
+        self, character: str, engine: MemoryEngine,
+    ) -> dict[str, Any] | None:
+        """跑单个库的维护。坏库只记警告，不让启动或定时器整体失败。"""
+        if not hasattr(self, '_maintenance_errors'):
+            # 手写 __new__ 构造的实例没有跑过 __init__，这里补一次，避免容错路径本身炸掉
+            self._maintenance_errors = {}
+        try:
+            result = await asyncio.to_thread(engine.maintenance)
+        except Exception as exc:  # noqa: BLE001 - 单库失败不能拖垮启动和定时器
+            self._maintenance_errors[character] = str(exc)
+            self.logger.warning(
+                '维护失败，已跳过该库（其他库继续）：%s %s', character or '(default)', exc)
+            return None
+        self._maintenance_errors.pop(character, None)
+        return result if isinstance(result, dict) else None
 
     def _character(self, kwargs: dict | None = None) -> str:
         """取角色名：优先宿主作用域 `ctx.current_lanlan`，再认宿主注入的 `_ctx`。"""

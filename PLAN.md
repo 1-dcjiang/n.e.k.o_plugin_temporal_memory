@@ -280,3 +280,10 @@
 - 待确认可见性：`pending_alert_days` / `pending_overdue` / `pending_oldest_days` 进面板快照，状态栏提醒超 7 天未处理。
 - 存储：`PRAGMA secure_delete=ON`，单条删除零覆盖；清空全部仍 checkpoint + VACUUM。
 - 版本 0.5.13，测试数 194 项 / 190 个 `def test_`。
+
+## 30. 上架审查整改（0.5.14）
+
+- 描述层：README「使用前提（必读）」+ `plugin.toml` description/short_description + `i18n` 的 plugin 与 `entry.observe` 描述，统一写明「靠模型每轮调用 observe、覆盖不保证、原话由模型提交、对话明文落本地、召回是拉取式」。
+- 面板 i18n：把所有硬编码中文换成 `props.t("ui.*")`；两个 locale 键集同构（192 键），补全 6 个缺失入口文案；面板与 i18n 用测试互相锁定（引用必须存在、不许有死键、除注释外不许出现中文）。
+- 维护容错：`_run_maintenance` 包住逐库 `engine.maintenance`，异常只记警告与 `_maintenance_errors`；启动与定时器都不再被单个坏库打断，恢复后自动清除错误记录。
+- 版本 0.5.14，测试数 205 项 / 199 个 `def test_`。
