@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "N.E.K.O: check temporal_memory",
+      "type": "shell",
+      "command": "uv run neko-plugin check temporal_memory",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: sync temporal_memory",
+      "type": "shell",
+      "command": "uv run neko-plugin sync temporal_memory --clean",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: check -r temporal_memory",
+      "type": "shell",
+      "command": "uv run neko-plugin check -r temporal_memory",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: build temporal_memory",
+      "type": "shell",
+      "command": "uv run neko-plugin build temporal_memory",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

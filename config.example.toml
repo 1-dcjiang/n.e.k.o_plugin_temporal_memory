@@ -1,0 +1,29 @@
+# 首次启动时由 N.E.K.O 复制到用户数据目录的运行时配置
+# 结构必须与源码 plugin.toml 的 [settings] 保持一致
+
+[settings]
+enabled = true
+
+# 工作记忆窗口：保留最近多少轮原文（超出后最老的被挤出）
+working_window = 8
+
+# 生成情景锚点的打分阈值，0~1；越高越少产锚点
+anchor_threshold = 0.3
+
+# 单个锚点摘要的最大字符数
+max_anchor_summary_chars = 140
+
+# 显著度分层参数
+hot_recall_window_days = 7
+cold_after_days = 60
+
+# 久不确认自动休眠：事件 90 天、偏好/事实 180 天；手动固定不参与
+dormancy_event_days = 90
+dormancy_preference_days = 180
+
+# 召回预算
+max_recall_anchors = 6
+max_recall_semantics = 12
+recall_char_budget = 1200
+
+# v0.4 不再有被动注入：不往对话里 push_message，只由模型显式调用召回工具
