@@ -488,7 +488,7 @@ def test_engine_export_caps_rows_but_reports_truncation(tmp_path):
 def test_plugin_export_surfaces_truncation_warning(tmp_path, monkeypatch):
     plugin = _make_plugin(tmp_path)
     engine = asyncio.run(plugin._ensure_engine('猫娘'))
-    monkeypatch.setattr(engine, 'export', lambda: {
+    monkeypatch.setattr(engine, 'export', lambda **_: {
         'exported_at': 1, 'schema': 4, 'anchors': [{'id': 'epi_x'}],
         'semantics': [], 'truncated': {'anchors': True, 'semantics': False},
     })

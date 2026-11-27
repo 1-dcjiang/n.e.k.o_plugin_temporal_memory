@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased（A1752 深审修复）
+
+- A1 假设误判：假设线索只在句首或「假设类动词 + 第一人称/角色」命中，`如果/要是/设定/测试一下` 单独出现不再算假设；显式「记住/别忘」优先；假设句必须过 `anchor_threshold` 才落库，假设区上限 200 条。
+- A2 加权召回：候选池改为 `max_anchors × 4` 后再按相关度、近因、score、召回次数排序；去掉按 `ts` 的二次重排，预算裁剪先丢低权重尾部。
+- A3 摘要标签：锚点摘要只收用户原话、不再拼助手回复；渲染改为 `[时间｜salience｜摘要]`，只有 `quote` 标「用户原话」。
+- A4 敏感范围：正文命中生日/纪念日/婚礼/告白等词也按敏感；导出同时过滤工作记忆；清除覆盖工作记忆；含敏感的 `*.migrated` 迁移备份整份删除；面板确认文案写明范围。
+- A5 去重：`pinned` 优先且不参与自动归档；去重不再写撤销记录，避免顶掉用户真实操作。
+- A6 预算：`recall_token_budget` 与 `hypothesis_retention_days` 纳入设置范围；token 下限 240（高于头部）；字符/token 预算加最终硬裁，小预算至少保留一条截断正文。
+- A7 其他：导出先取全量再过滤，避免 `truncated` 误报；`consolidate` 扫描全部 active；假设确认后改回普通 kind；面板显示假设删除倒计时；`recall_temporal_memory` 返回 `tokens/token_budget`；`observe` 结果暴露 `hypothesis`。
+- B 类：`purge_stale` 提交后统一做一次 WAL/FTS 收尾；去掉 `export_memories` 的 `TypeError` 无参回退；去重前复查 `pinned/status`；测试包名不依赖克隆目录名。
+- 测试：新增 `tests/test_review_a1752.py` 17 项，覆盖上述回归；同步修正 token 预算与导出测试。
+
 ## 0.6.0
 
 按「temporal_memory 可单独升级的部分」路线图，收口六项不依赖订阅钩子/跨作者边界的能力：

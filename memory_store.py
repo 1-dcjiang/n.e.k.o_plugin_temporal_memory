@@ -585,6 +585,13 @@ class MemoryStore:
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def all_working_turns(self) -> list[dict[str, Any]]:
+        """读取全部工作记忆，供合规清除敏感原话使用；面板预览仍走 recent_turns。"""
+        with self._lock, self._session() as conn:
+            rows = conn.execute(
+                'SELECT id, ts, role, content FROM wm ORDER BY id ASC').fetchall()
+        return [dict(r) for r in rows]
+
     def delete_working_turn(self, turn_id: int) -> bool:
         """永久删除工作记忆里的一条原话，不受窗口滚动限制。不可撤销。"""
         try:
@@ -895,7 +902,8 @@ class MemoryStore:
 
     def delete_anchor(self, anchor_id: str, *,
                       stale_cutoffs: tuple[int, int] | None = None,
-                      clean_revisions: bool = True) -> bool:
+                      clean_revisions: bool = True,
+                      purge_residue: bool = True) -> bool:
         """删除锚点并修复 prev/next 两端；这是链路完整性的唯一入口。
 
         stale_cutoffs 非空时，删除前在同一事务里复查 pinned/status/时间，
@@ -923,12 +931,14 @@ class MemoryStore:
                 self._purge_revision_refs(conn, anchor_id)
             conn.execute('DELETE FROM anchors WHERE id=?', (anchor_id,))
             self._commit(conn)
-        self._purge_delete_residue()
+        if purge_residue:
+            self._purge_delete_residue()
         return True
 
     def delete_semantic(self, semantic_id: str, *,
                         stale_cutoffs: tuple[int, int] | None = None,
-                        clean_revisions: bool = True) -> bool:
+                        clean_revisions: bool = True,
+                        purge_residue: bool = True) -> bool:
         """永久删除语义条目，并清掉邻接边与事件关联；不可撤销。"""
         with self._lock, self._session() as conn:
             row = conn.execute(
@@ -944,7 +954,8 @@ class MemoryStore:
                 self._purge_revision_refs(conn, semantic_id)
             conn.execute('DELETE FROM semantics WHERE id=?', (semantic_id,))
             self._commit(conn)
-        self._purge_delete_residue()
+        if purge_residue:
+            self._purge_delete_residue()
         return True
 
     def delete_permanent(self, table: str, memory_id: str) -> dict[str, Any]:
@@ -1032,17 +1043,23 @@ class MemoryStore:
             deleted_anchor_ids = [
                 anchor_id for anchor_id in anchor_ids
                 if self.delete_anchor(anchor_id, stale_cutoffs=cutoffs,
-                                      clean_revisions=False)
+                                      clean_revisions=False,
+                                      purge_residue=False)
             ]
             deleted_semantic_ids = [
                 semantic_id for semantic_id in semantic_ids
                 if self.delete_semantic(semantic_id, stale_cutoffs=cutoffs,
-                                        clean_revisions=False)
+                                        clean_revisions=False,
+                                        purge_residue=False)
             ]
             self._purge_revision_refs_many(
                 conn, {*deleted_anchor_ids, *deleted_semantic_ids})
             deleted_anchors = len(deleted_anchor_ids)
             deleted_semantics = len(deleted_semantic_ids)
+        # 写事务已提交后再统一收尾一次：事务内逐条 checkpoint 会与自己抢写锁，
+        # busy_timeout 200ms 后放弃，WAL 反而永远截不掉。
+        if deleted_anchors or deleted_semantics:
+            self._purge_delete_residue()
         return {'ok': True, 'anchors': deleted_anchors,
                 'semantics': deleted_semantics,
                 'total': deleted_anchors + deleted_semantics}

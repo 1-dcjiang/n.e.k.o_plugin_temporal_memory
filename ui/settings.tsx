@@ -42,6 +42,7 @@ type MemoryItem = {
   effective_score?: number
   age_days?: number
   next_sleep_days?: number | null
+  delete_in_days?: number | null
   pinned?: number | boolean
   ts?: number
   time_label?: string
@@ -332,7 +333,8 @@ export default function TemporalMemorySettings(
     }
   }
 
-  async function purgeOld() {    const accepted = await confirm({
+  async function purgeOld() {
+    const accepted = await confirm({
       title: t("ui.confirm.purge_title"),
       message: t("ui.confirm.purge_message"),
       tone: "danger",
@@ -740,10 +742,14 @@ export default function TemporalMemorySettings(
                       <Text>
                         {item.pinned
                           ? t("ui.memory.pinned_score", { score: item.effective_score ?? item.score ?? 0 })
-                          : t("ui.memory.sleeping_score", {
-                            score: item.effective_score ?? item.score ?? 0,
-                            days: item.next_sleep_days ?? "?",
-                          })}
+                          : item.status === "hypothesis"
+                            ? t("ui.memory.hypothesis_delete_in", {
+                              days: item.delete_in_days ?? "?",
+                            })
+                            : t("ui.memory.sleeping_score", {
+                              score: item.effective_score ?? item.score ?? 0,
+                              days: item.next_sleep_days ?? "?",
+                            })}
                       </Text>
                       <Text>{item.character ? t("ui.memory.character", { character: item.character }) : ""}</Text>
                     </Inline>

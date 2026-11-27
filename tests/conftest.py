@@ -119,3 +119,26 @@ def _install_fake_sdk() -> None:
 
 
 _install_fake_sdk()
+
+
+def _ensure_importable_package_name() -> None:
+    """独立检出目录名可能是 n.e.k.o_plugin_temporal_memory。
+
+    测试统一 `from temporal_memory import ...`，所以这里按路径把包注册成
+    固定模块名，不要求克隆目录必须叫 temporal_memory。
+    """
+    if PROJECT_ROOT.name == 'temporal_memory' or 'temporal_memory' in sys.modules:
+        return
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        'temporal_memory', PROJECT_ROOT / '__init__.py',
+        submodule_search_locations=[str(PROJECT_ROOT)])
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['temporal_memory'] = module
+    spec.loader.exec_module(module)
+
+
+_ensure_importable_package_name()

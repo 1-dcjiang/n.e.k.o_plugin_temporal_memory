@@ -12,9 +12,10 @@ from collections.abc import Iterable
 from typing import Any
 
 from . import retrieval, scoring
-from .memory_store import MemoryCapacityError, MemoryStore
+from .memory_store import MAX_TOTAL_MEMORIES, MemoryCapacityError, MemoryStore
 
 MAX_EXPORT_ROWS_PER_TABLE = 10000
+MAX_HYPOTHESES = 200
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     'enabled': True,
@@ -37,19 +38,36 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 CONFIRM_SIMILARITY = 0.92
 
 SENSITIVE_TAGS = frozenset({
-    '里程碑', '纪念', '纪念日', '第一次', '生日', '周年', '情感', '告白', '求婚',
-    'milestone', 'anniversary', 'birthday', 'emotional',
+    '里程碑', '纪念', '纪念日', '生日', '周年', '情感', '告白', '求婚',
+    'milestone', 'anniversary', 'birthday', 'emotional', 'confession', 'proposal',
 })
+
+# observe 的标签白名单只有领域词，自动标签永远不会有「生日」；敏感判定必须看正文。
+SENSITIVE_TEXT_TERMS = (
+    '生日', '诞生日', '纪念日', '周年', '结婚', '婚礼', '求婚', '告白',
+    '初恋', '初吻', '分手', '第一次一起', '第一次见', '第一次约',
+    '第一次告白', '第一次接吻', '里程碑',
+    'birthday', 'anniversary', 'milestone', 'proposal', 'confession',
+)
+
+
+def is_sensitive_text(text: Any) -> bool:
+    """按正文判断里程碑/情感内容：不依赖模型有没有主动打标签。"""
+    normalized = str(text or '').lower().replace('，', ',')
+    return any(term in normalized for term in SENSITIVE_TEXT_TERMS)
 
 
 def _is_sensitive(item: dict[str, Any], table: str) -> bool:
-    """里程碑/情感类默认不导出；标签或高情绪锚点都算。
+    """里程碑/情感类默认不导出；标签、正文或高情绪锚点都算。
 
     这是保守规则，不判断内容语义；用户可在导出面板显式勾选包含。
     """
     tags = str(item.get('tags') or '').lower().replace('，', ',')
     tag_set = {tag.strip() for tag in tags.split(',') if tag.strip()}
     if tag_set & SENSITIVE_TAGS:
+        return True
+    text = item.get('quote') or item.get('summary') or item.get('content') or ''
+    if is_sensitive_text(text):
         return True
     if table == 'anchors' and float(item.get('emotion') or 0.0) >= 0.75:
         return True
@@ -125,7 +143,8 @@ class MemoryEngine:
         payload: dict[str, Any] = {'score': result.as_dict(), 'anchored': False,
                                    'hypothesis': False,
                                    'anchor': None, 'semantics': [], 'turn_no': turn_no}
-        if scoring.is_hypothesis(user_text):
+        if (scoring.is_hypothesis(user_text)
+                and result.score >= float(self.settings['anchor_threshold'])):
             # 玩笑、假设、角色扮演设定单独进假设区：保留原话供核对，
             # 但不建事实/偏好、不参与召回，也不挤占锚点额度。
             anchor = self._create_hypothesis(user_text, ts=ts,
@@ -133,6 +152,10 @@ class MemoryEngine:
                                              tags=result.tags,
                                              source_event_id=source_event_id)
             payload.update({'hypothesis': True, 'anchor': anchor})
+            return payload
+        if scoring.is_hypothesis(user_text):
+            # 假设句也没过阈值：不落库，避免靠假设分支绕开稀疏策略。
+            payload['hypothesis'] = True
             return payload
         anchor: dict[str, Any] = {}
         if result.should_anchor and result.score >= float(self.settings['anchor_threshold']):
@@ -211,6 +234,13 @@ class MemoryEngine:
     def _create_hypothesis(self, user_text: str, *, ts: int, time_label: str,
                            tags: list[str], source_event_id: str = '') -> dict[str, Any]:
         """假设区条目：保留原话，但状态不是 active，召回和生命周期都不会碰它。"""
+        rows = [item for item in self.store.all_memories('anchors', MAX_TOTAL_MEMORIES)
+                if item.get('status') == 'hypothesis']
+        if len(rows) >= MAX_HYPOTHESES:
+            # 假设区也有上限：先删最老的，避免玩笑句无限占用明文库。
+            for item in sorted(rows, key=lambda row: int(row.get('ts') or 0))[
+                    :len(rows) - MAX_HYPOTHESES + 1]:
+                self.store.delete_permanent('anchors', item['id'])
         return self.store.add_anchor(
             summary=scoring.summarize(
                 user_text, max_chars=int(self.settings['max_anchor_summary_chars'])),
@@ -235,8 +265,7 @@ class MemoryEngine:
         pinned = False
         return self.store.add_anchor(
             summary=scoring.summarize(
-                user_text, assistant_text,
-                max_chars=int(self.settings['max_anchor_summary_chars'])),
+                user_text, max_chars=int(self.settings['max_anchor_summary_chars'])),
             ts=ts,
             time_label=time_label,
             emotion=score.emotion,
@@ -390,6 +419,11 @@ class MemoryEngine:
             effective = 0.0
         else:
             effective = round(base * (0.5 ** (age_days / max(1.0, horizon))), 3)
+        retention = max(1, int(self.settings.get('hypothesis_retention_days') or 14))
+        hypothesis_left = None
+        if item.get('status') == 'hypothesis':
+            hypothesis_left = max(0.0, (
+                int(item.get('ts') or 0) + retention * 86400 - now) / 86400)
         return {
             **item,
             'ts': int(item.get('ts') or item.get('created_at') or 0),
@@ -397,8 +431,11 @@ class MemoryEngine:
             'text': item.get(text_key) or '',
             'effective_score': effective,
             'age_days': round(age_days, 1),
-            'next_sleep_days': None if item.get('pinned') else
+            'next_sleep_days': None if item.get('pinned') or
+            item.get('status') == 'hypothesis' else
             round(max(0.0, horizon - age_days), 1),
+            'delete_in_days': None if hypothesis_left is None
+            else round(hypothesis_left, 1),
             'can_recall': item.get('status') == 'active' and bool(item.get('quote')),
             'sensitive': _is_sensitive(item, table),
         }
@@ -406,7 +443,19 @@ class MemoryEngine:
     # ------------------------------------------------------------- 面板维护
 
     def confirm(self, table: str, memory_id: str) -> dict[str, Any]:
-        return self.store.confirm_memory(table, memory_id)
+        result = self.store.confirm_memory(table, memory_id)
+        if result.get('ok') and table == 'anchors':
+            item = self.store.get_memory(table, memory_id)
+            if item and item.get('kind') == 'hypothesis':
+                # 用户确认「假设」其实是真的：改回普通事件类型，避免面板/导出
+                # 一直把它当假设，也避免后续召回仍被 kind 误导。
+                self.store.revise_memory(
+                    table, memory_id, action='confirm',
+                    kind=scoring.classify_memory(item.get('quote') or ''))
+                item = self.store.get_memory(table, memory_id)
+                if item:
+                    result = {**result, 'item': item}
+        return result
 
     def pin(self, table: str, memory_id: str, pinned: bool) -> dict[str, Any]:
         return self.store.set_pinned(table, memory_id, pinned)
@@ -443,8 +492,10 @@ class MemoryEngine:
         cap = max(1, int(max_rows))
         if include_sensitive is None:
             include_sensitive = bool(self.settings.get('export_sensitive_by_default', False))
-        anchors = self.store.all_memories('anchors', cap + 1)
-        semantics = self.store.all_memories('semantics', cap + 1)
+        # 先取全量再过滤：如果先取 cap+1 再过滤，前 1 万条全是敏感条目时
+        # 第 10001 条普通条目会被静默藏掉，truncated 也会误报。
+        anchors = self.store.all_memories('anchors', MAX_TOTAL_MEMORIES + 1)
+        semantics = self.store.all_memories('semantics', MAX_TOTAL_MEMORIES + 1)
         redacted = 0
         if not include_sensitive:
             kept_anchors = [item for item in anchors if not _is_sensitive(item, 'anchors')]
@@ -455,12 +506,18 @@ class MemoryEngine:
         semantics_truncated = len(semantics) > cap
         window = self.settings.get('working_window')
         window = 8 if window is None else max(0, int(window))
+        working = self.store.recent_turns(window)
+        if not include_sensitive:
+            kept_working = [turn for turn in working
+                            if not is_sensitive_text(turn.get('content'))]
+            redacted += len(working) - len(kept_working)
+            working = kept_working
         return {
             'exported_at': int(time.time()),
             'schema': 4,
             'anchors': anchors[:cap],
             'semantics': semantics[:cap],
-            'working_memory': self.store.recent_turns(window),
+            'working_memory': working,
             'truncated': {'anchors': anchors_truncated,
                           'semantics': semantics_truncated},
             'redacted_sensitive': redacted,
@@ -469,15 +526,22 @@ class MemoryEngine:
 
     def clear_sensitive(self) -> dict[str, Any]:
         """永久清除里程碑/情感类条目；只在本插件私有库内执行，不可撤销。"""
-        total = {'ok': True, 'anchors': 0, 'semantics': 0, 'total': 0}
+        total = {'ok': True, 'anchors': 0, 'semantics': 0,
+                 'working': 0, 'total': 0}
         for table in ('anchors', 'semantics'):
-            for item in self.store.all_memories(table, MAX_EXPORT_ROWS_PER_TABLE):
+            for item in self.store.all_memories(table, MAX_TOTAL_MEMORIES + 1):
                 if not _is_sensitive(item, table):
                     continue
                 result = self.store.delete_permanent(table, item['id'])
                 if result.get('ok'):
                     total[table] += 1
                     total['total'] += 1
+        for turn in self.store.all_working_turns():
+            if not is_sensitive_text(turn.get('content')):
+                continue
+            if self.store.delete_working_turn(int(turn['id'])):
+                total['working'] += 1
+                total['total'] += 1
         return total
 
     def consolidate(self, now: int | None = None) -> dict[str, int]:
@@ -491,7 +555,7 @@ class MemoryEngine:
         retention = max(1, int(self.settings.get('hypothesis_retention_days') or 14))
         cutoff = now - retention * 86400
         counts = {'hypotheses': 0, 'anchors': 0, 'semantics': 0}
-        anchors = self.store.all_memories('anchors', MAX_EXPORT_ROWS_PER_TABLE)
+        anchors = self.store.all_memories('anchors', MAX_TOTAL_MEMORIES + 1)
         for item in anchors:
             if item.get('status') == 'hypothesis' and int(item.get('ts') or 0) < cutoff:
                 if self.store.delete_permanent('anchors', item['id']).get('ok'):
@@ -499,9 +563,9 @@ class MemoryEngine:
         if not self.settings.get('consolidate_duplicates', True):
             return counts
         anchors = [item for item in self.store.all_memories(
-            'anchors', MAX_EXPORT_ROWS_PER_TABLE) if item.get('status') == 'active']
+            'anchors', MAX_TOTAL_MEMORIES + 1) if item.get('status') == 'active']
         semantics = [item for item in self.store.all_memories(
-            'semantics', MAX_EXPORT_ROWS_PER_TABLE) if item.get('status') == 'active']
+            'semantics', MAX_TOTAL_MEMORIES + 1) if item.get('status') == 'active']
         for table, items, text_key, count_key in (
                 ('anchors', anchors, 'quote', 'anchors'),
                 ('semantics', semantics, 'content', 'semantics')):
@@ -514,12 +578,22 @@ class MemoryEngine:
                 if len(group) < 2:
                     continue
                 group.sort(key=lambda item: (
+                    -int(item.get('pinned') or 0),
                     -float(item.get('score') or 0.0),
                     -int(item.get('last_confirmed_at') or 0),
                     -int(item.get('created_at') or 0),
                 ))
                 for duplicate in group[1:]:
-                    if self.store.archive_memory(table, duplicate['id']).get('ok'):
+                    if duplicate.get('pinned'):
+                        # 固定是用户明确要求长期保留，不参与自动去重。
+                        continue
+                    current = self.store.get_memory(table, duplicate['id'])
+                    if not current or current.get('pinned') or current.get('status') != 'active':
+                        continue
+                    result = self.store.set_memory_state(
+                        table, duplicate['id'], status='archived',
+                        action='consolidate', record_revision=False)
+                    if result.get('ok'):
                         counts[count_key] += 1
         return counts
 

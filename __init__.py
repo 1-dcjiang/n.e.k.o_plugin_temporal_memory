@@ -29,7 +29,12 @@ from plugin.sdk.plugin import (
     ui,
 )
 
-from .engine import DEFAULT_SETTINGS, MAX_EXPORT_ROWS_PER_TABLE, MemoryEngine
+from .engine import (
+    DEFAULT_SETTINGS,
+    MAX_EXPORT_ROWS_PER_TABLE,
+    MemoryEngine,
+    is_sensitive_text,
+)
 from .memory_store import MAX_TOTAL_MEMORIES
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +43,39 @@ MAX_QUERY_CHARS = 200
 MAX_ENGINES = 32
 MAX_EXPORT_TOTAL_ROWS = 20000
 MAX_TAGS = 6
+
+
+def _backup_has_sensitive(path: str) -> bool:
+    """只读扫描迁移备份 SQLite：命中敏感词就整份删除，避免旧库明文残留。"""
+    uri = f'file:{path}?mode=ro'
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute('PRAGMA busy_timeout=2000')
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        columns = (('anchors', ('quote', 'summary')),
+                   ('semantics', ('content',)),
+                   ('wm', ('content',)))
+        for table, names in columns:
+            if table not in tables:
+                continue
+            for column in names:
+                try:
+                    rows = conn.execute(f'SELECT {column} FROM {table}')
+                except sqlite3.Error:
+                    continue
+                if any(is_sensitive_text(row[0]) for row in rows):
+                    return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return False
+
+
 TAG_RE = re.compile(r'[0-9A-Za-z_\-\u4e00-\u9fff]{1,16}')
 _TS_FLOOR = 10 * 365 * 86400
 WRITE_LIMIT = 30
@@ -72,7 +110,6 @@ def _sanitize_tags(values: Any) -> list[str]:
     return tags
 
 SETTING_RANGES: dict[str, tuple[float, float]] = {
-    'working_window': (0, 50),
     'anchor_threshold': (0.0, 1.0),
     'max_anchor_summary_chars': (20, 1000),
     'hot_recall_window_days': (1, 365),
@@ -82,6 +119,9 @@ SETTING_RANGES: dict[str, tuple[float, float]] = {
     'max_recall_anchors': (1, 30),
     'max_recall_semantics': (1, 60),
     'recall_char_budget': (200, 8000),
+    'recall_token_budget': (240, 8000),
+    'hypothesis_retention_days': (1, 3650),
+    'working_window': (0, 50),
 }
 
 
@@ -167,14 +207,15 @@ class TemporalMemoryPlugin(NekoPluginBase):
             },
             'required': ['user_text'],
         },
-        llm_result_fields=['anchored', 'anchor', 'semantics'],
+        llm_result_fields=['anchored', 'hypothesis', 'anchor', 'semantics'],
     )
     async def observe(self, user_text: str = '', assistant_text: str = '',
                       source_event_id: str = '', ts: int | None = None, **_):
         if not self._settings.get('enabled', True):
             # 总开关关闭时直接短路，避免为了返回 skipped 给该角色建空库
             return Ok({'ok': True, 'skipped': 'disabled', 'turn_no': 0,
-                       'anchored': False, 'anchor': None, 'semantics': []})
+                       'anchored': False, 'hypothesis': False,
+                       'anchor': None, 'semantics': []})
         character = self._character(_)
         engine = await self._ensure_engine(character)
         if engine is None:
@@ -203,6 +244,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
         name="记住一件事",
         description=(
             "用户明确要求「记住这件事／别忘」时调用，直接写入一条带原话证据的记忆。"
+            "生日、纪念日、婚礼、告白等敏感内容请同时带 `里程碑/生日/情感` 标签，"
+            "方便导出过滤和清除；正文命中敏感词时也会自动按敏感处理。"
             "pinned=true 表示用户要求长期保留，不参与自动休眠。"
         ),
         input_schema={
@@ -272,23 +315,29 @@ class TemporalMemoryPlugin(NekoPluginBase):
     async def recall_tool(self, query: str = '', **_):
         character = self._character(_)
         if not self._settings.get('enabled', True):
-            return {'text': '', 'chars': 0, 'anchors': 0, 'semantics': 0,
+            return {'text': '', 'chars': 0, 'tokens': 0, 'token_budget': 0,
+                    'anchors': 0, 'semantics': 0,
                     'disabled': True, 'reason': 'memory_disabled'}
         engine = await self._ensure_engine(character)
         query = (query or '').strip()[:MAX_QUERY_CHARS]
         if engine is None:
-            return {'text': '', 'chars': 0, 'anchors': 0, 'semantics': 0,
+            return {'text': '', 'chars': 0, 'tokens': 0, 'token_budget': 0,
+                    'anchors': 0, 'semantics': 0,
                     'error': self._engine_error(character)}
         if not query:
-            return {'text': '', 'chars': 0, 'anchors': 0, 'semantics': 0}
+            return {'text': '', 'chars': 0, 'tokens': 0, 'token_budget': 0,
+                    'anchors': 0, 'semantics': 0}
         try:
             result = await asyncio.to_thread(engine.recall, query)
         except Exception as exc:
             self.logger.warning('召回失败，返回空结果: %s', exc)
-            return {'text': '', 'chars': 0, 'anchors': 0, 'semantics': 0}
+            return {'text': '', 'chars': 0, 'tokens': 0, 'token_budget': 0,
+                    'anchors': 0, 'semantics': 0}
         return {
             'text': result.get('prompt_block', ''),
             'chars': result.get('chars', 0),
+            'tokens': result.get('tokens', 0),
+            'token_budget': result.get('token_budget', 0),
             'anchors': len(result.get('anchors') or []),
             'semantics': len(result.get('semantics') or []),
         }
@@ -753,12 +802,8 @@ class TemporalMemoryPlugin(NekoPluginBase):
                         opened = await asyncio.to_thread(
                             MemoryEngine, path, dict(self._settings))
                         engine = opened
-                    try:
-                        one = await asyncio.to_thread(
-                            engine.export, include_sensitive=bool(include_sensitive))
-                    except TypeError:
-                        # 测试/旧实现可能还是无参 export；退回旧的默认行为。
-                        one = await asyncio.to_thread(engine.export)
+                    one = await asyncio.to_thread(
+                        engine.export, include_sensitive=bool(include_sensitive))
                     character = engine.store.get_owner() or ''
                 except Exception as exc:
                     failures.append(os.path.basename(path))
@@ -1000,6 +1045,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
         if not confirmed:
             return Err(SdkError('清除里程碑/情感条目需要二次确认'))
         total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
+                                 'working': 0, 'backups': 0,
                                  'total': 0, 'databases': 0, 'failed': 0}
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
@@ -1020,8 +1066,9 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 if opened is not None:
                     await asyncio.to_thread(opened.store.close)
             total['databases'] += 1
-            for key in ('anchors', 'semantics', 'total'):
+            for key in ('anchors', 'semantics', 'working', 'total'):
                 total[key] += int(one.get(key) or 0)
+        total['backups'] = self._purge_sensitive_migration_backups()
         total['ok'] = total['failed'] == 0
         self._unloaded_cache = None
         return Ok(total)
@@ -1089,6 +1136,28 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 os.remove(os.path.join(parent, name))
             except OSError as exc:
                 self.logger.warning('删除迁移备份失败(%s): %s', name, exc)
+                continue
+            removed += 1
+        return removed
+
+    def _purge_sensitive_migration_backups(self) -> int:
+        """清除敏感条目后，连带删除含敏感明文的迁移备份；无敏感的备份保留。"""
+        parent = os.path.dirname(self._db_path())
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            return 0
+        removed = 0
+        for name in names:
+            if '.db.migrated' not in name:
+                continue
+            path = os.path.join(parent, name)
+            try:
+                if not _backup_has_sensitive(path):
+                    continue
+                os.remove(path)
+            except OSError as exc:
+                self.logger.warning('删除含敏感内容的迁移备份失败(%s): %s', name, exc)
                 continue
             removed += 1
         return removed

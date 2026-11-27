@@ -43,13 +43,17 @@ def test_recall_labels_user_quote_and_inference(tmp_path):
 
 
 def test_token_budget_is_capped(tmp_path):
+    # token 预算有下限：设得比头部+至少一条正文还小会只剩空标题，240 是最低有效值。
     engine = _engine(tmp_path, {'recall_char_budget': 1200,
-                                'recall_token_budget': 40})
+                                'recall_token_budget': 240})
     for index in range(8):
         engine.remember(f'全飞秒术后第 {index} 天要滴眼药水，别揉眼睛', ts=1000 + index)
     result = engine.recall('全飞秒 眼药水')
-    assert result['token_budget'] == 40
-    assert result['tokens'] <= 40 + 20
+    assert result['token_budget'] == 240
+    assert result['tokens'] > 0
+    assert result['prompt_block'].strip()
+    assert '眼药水' in result['prompt_block']
+    assert result['tokens'] <= 240
     assert result['chars'] <= 1200
 
 

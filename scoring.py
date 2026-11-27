@@ -23,7 +23,7 @@ SIGNAL_PATTERNS: tuple[tuple[str, str, float], ...] = (
     ('emotion', rf'焦虑|崩溃|难过|生气|害怕|紧张|失望|开心|兴奋|孤独|{_en_word("scared")}|{_en_word("anxious")}|{_en_word("upset")}|{_en_word("angry")}|{_en_word("happy")}|{_en_word("excited")}', 0.30),
     ('knowledge', rf'第一次|首次|刚学会|刚配置|报错|错误|{_en_word("error")}|{_en_word("bug")}|不兼容|文档里说', 0.30),
     ('decision', rf'决定|计划|打算|报名|截止|{_en_word("deadline")}|明天|下周|下个月|选择要', 0.25),
-    ('task', r'帮我|排查|修复|提交|申请|处理一下', 0.10),
+    ('task', r'帮我|排查|修复|提交|申请|处理一下|设定', 0.10),
 )
 
 STRONG_EMOTION = re.compile(r'崩溃|绝望|狂喜|极度|特别焦虑|特别开心|panic|devastated')
@@ -120,6 +120,11 @@ def score_turn(user_text: str, assistant_text: str = '',
             signals.append(name)
             total += weight
 
+    if is_hypothesis(user):
+        # 假设句也要过阈值才落库；否则「假设明天可能下雨」这种闲聊会绕开稀疏策略。
+        signals.append('hypothesis')
+        total += 0.35
+
     # 先认信号再判平淡：「明天考试」「报名了」这类短句不能因为长度被吃掉
     mundane = is_mundane(user) and not signals
     if mundane:
@@ -138,13 +143,9 @@ def score_turn(user_text: str, assistant_text: str = '',
 
 
 def summarize(user_text: str, assistant_text: str = '', max_chars: int = 140) -> str:
-    """锚点摘要：优先保留用户原句，助手回复只作补充，超长按句号截断。"""
+    """锚点摘要只收用户原句；助手回复不是用户证据，不能混进「用户原话」标签。"""
     user_text = _normalize(user_text)
-    assistant_text = _normalize(assistant_text)
-    if assistant_text:
-        text = f'用户: {user_text}｜回复: {assistant_text}'
-    else:
-        text = user_text
+    text = user_text
     if len(text) <= max_chars:
         return text
     cut = text[: max_chars - 1]
@@ -188,28 +189,54 @@ FACT_CUES: tuple[str, ...] = (
 )
 
 
-HYPOTHESIS_CUES: tuple[str, ...] = (
-    '假设', '假如', '如果', '要是', '倘若', '假装', '角色扮演', '来玩', '玩个',
-    '想象一下', '设定', '开个玩笑', '开玩笑', '逗你', '测试一下', '做个假设',
-    'what if', 'suppose', 'pretend', 'roleplay', 'role play', 'hypothetically',
+HYPOTHESIS_PREFIX_CUES: tuple[str, ...] = (
+    '假设', '假如', '倘若', '假装', '角色扮演', '来玩', '玩个',
+    '想象一下', '做个假设', '开个玩笑', '开玩笑', '逗你',
 )
+HYPOTHESIS_FIRST_PERSON: tuple[str, ...] = (
+    '如果我是', '如果我变成', '如果我是你', '如果让你', '要是我是',
+    '要是让你', '如果我是一只', '如果我变成一只', '如果你是我',
+)
+# 「如果」「要是」「设定」「测试一下」单独出现不再算假设：
+# 前者常是条件规则（记住，如果我说红色就停），后者常是闹钟/日程。
+HYPOTHESIS_ROLE_PATTERN = re.compile(
+    r'(?:如果|要是).{0,12}(?:你当|你扮演|你变成|你是)')
+HYPOTHESIS_SETTING_PATTERN = re.compile(
+    r'设定(?:一个|个)?(?:角色|场景|世界|规则|人设|剧情|故事)')
+EXPLICIT_MEMORY_PATTERN = re.compile(
+    r'记住|记下|别忘|不要忘|务必记住|remember', re.IGNORECASE)
 _HYPOTHESIS_ASCII = re.compile(
     r'\b(?:what if|suppose|pretend|role ?play|hypothetically)\b', re.IGNORECASE)
+
+
+def is_explicit_memory(text: str) -> bool:
+    """显式「记住/别忘」优先：这类句子即使带「如果」也必须是事实，不是假设。"""
+    return bool(EXPLICIT_MEMORY_PATTERN.search(_normalize(text)[:80]))
 
 
 def is_hypothesis(text: str) -> bool:
     """识别玩笑、假设、角色扮演设定；宁可漏判，也不把真实偏好打成假设。
 
-    只在句首或前 80 字内出现明确假设词时命中。日常里「如果没记错」这类插入语
-    仍可能误判，所以写入时只降级到假设区，不删除原话，面板可人工纠正。
+    只在句首出现假设词，或出现「假设类动词 + 第一人称/角色」时命中；
+    「如果」「要是」「设定」「测试一下」单独出现不再命中，避免把
+    「记住，如果我说红色就停」「我对花生过敏，如果做饭注意」「设定闹钟」
+    这类真实规则/事实丢进假设区。
     """
     normalized = _normalize(text).strip()
     if not normalized:
         return False
+    if is_explicit_memory(normalized):
+        return False
     head = normalized[:80].lower()
-    if _HYPOTHESIS_ASCII.search(head):
+    if any(head.startswith(cue) for cue in HYPOTHESIS_PREFIX_CUES):
         return True
-    return any(cue in head for cue in HYPOTHESIS_CUES)
+    if any(cue in head for cue in HYPOTHESIS_FIRST_PERSON):
+        return True
+    if HYPOTHESIS_ROLE_PATTERN.search(head):
+        return True
+    if HYPOTHESIS_SETTING_PATTERN.search(head):
+        return True
+    return bool(_HYPOTHESIS_ASCII.search(head))
 
 
 def classify_memory(text: str) -> str:
