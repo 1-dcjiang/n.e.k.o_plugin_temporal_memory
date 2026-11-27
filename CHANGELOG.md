@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased（A1755 增量复审修复）
+
+- A1 假设判定：`如果我是/如果让你` 只在句首命中；移除过宽的「你是」角色正则；`I suppose` 不再命中；显式记忆增加「记得/很重要/务必」；句首条件前已有事实/偏好（如「我对花生过敏，如果…」）不判假设，保留语义。
+- 假设阈值：`ScoreResult.raw_score` 去掉固定 +0.35 后再比 `anchor_threshold`，裸假设句默认不落库；假设区淘汰在事务内只删行，提交后统一收尾 WAL/FTS；查询改为 `statuses=('hypothesis',), limit=None`。
+- 全量导出/清除：`export`、`clear_sensitive`、`consolidate` 改 `limit=None`，不再停在 `MAX_TOTAL_MEMORIES+1`（5001）行；导出/清除扫描整表。
+- 敏感边界：`_is_sensitive` 同时检查 `quote/summary/content`；工作记忆过滤敏感用户发言后紧邻的助手复述；清除同步删除这两行。
+- 迁移备份：`_backup_has_sensitive` 用 `Path.as_uri()` 处理 `#/%/?` 等路径；打不开/损坏返回 `None`，保守删除并计入 `backups_unreadable`；备份清理移入 `asyncio.to_thread`，删除失败回报 `backups_failed`。
+- `confirm` 假设：`kind` 与 `status` 同一次更新，只写一条撤销记录，撤销可完整恢复。
+- 召回：`pinned` 不参与近因衰减；预算裁剪遇到放不下的行立即停止，不再跳过它去捡后面更短的低权重行。
+- 去重：`set_memory_state(require_unpinned_active=True)` 在同一条 UPDATE 前复查 `pinned/status`，避免检查与归档之间的窄窗口。
+- 假设寿命：按 `created_at` 而不是模型可传的 `ts` 计算保留期与面板倒计时。
+- 清理重复的 `_trim_block`（F811）；面板清除完成提示补齐 `working/backups/backups_unreadable` 占位符。
+- 测试：新增 `tests/test_review_a1755.py` 16 项；`test_real_sdk` 子进程改用 `TM_PLUGIN_ROOT` 显式装载包，独立检出目录名不再影响导入。
+- 版本待发布。
+
 ## 0.6.1（A1752 深审修复）
 
 - A1 假设误判：假设线索只在句首或「假设类动词 + 第一人称/角色」命中，`如果/要是/设定/测试一下` 单独出现不再算假设；显式「记住/别忘」优先；假设句必须过 `anchor_threshold` 才落库，假设区上限 200 条。

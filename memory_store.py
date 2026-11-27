@@ -543,6 +543,10 @@ class MemoryStore:
             finally:
                 conn.close()
 
+    def purge_delete_residue(self) -> None:
+        """事务提交后由调度层调用：FTS 旧段 + WAL 截断的公共收尾入口。"""
+        self._purge_delete_residue()
+
     def _rebuild_fts(self, conn: sqlite3.Connection) -> None:
         if self._fts_mode == 'none':
             return
@@ -958,13 +962,14 @@ class MemoryStore:
             self._purge_delete_residue()
         return True
 
-    def delete_permanent(self, table: str, memory_id: str) -> dict[str, Any]:
+    def delete_permanent(self, table: str, memory_id: str, *,
+                         purge_residue: bool = True) -> dict[str, Any]:
         """用户明确要求立即永久删除单条：不走 30/365 天清理等待。"""
         table = self._table(table)
         if table == 'anchors':
-            ok = self.delete_anchor(memory_id)
+            ok = self.delete_anchor(memory_id, purge_residue=purge_residue)
         else:
-            ok = self.delete_semantic(memory_id)
+            ok = self.delete_semantic(memory_id, purge_residue=purge_residue)
         return {'ok': True, 'table': table, 'id': memory_id} if ok \
             else {'ok': False, 'reason': 'not_found'}
 
@@ -1574,14 +1579,18 @@ class MemoryStore:
     def set_memory_state(self, table: str, memory_id: str, *,
                          status: str | None = None,
                          pinned: bool | None = None,
+                         kind: str | None = None,
                          confirm: bool = False,
                          action: str = 'state',
                          record_revision: bool = True,
                          allow_pending: bool = False,
-                         require_orphan: bool = False) -> dict[str, Any]:
+                         require_orphan: bool = False,
+                         require_unpinned_active: bool = False) -> dict[str, Any]:
         table = self._table(table)
         if status is not None and status not in MEMORY_STATUSES:
             return {'ok': False, 'reason': 'bad_status'}
+        if kind is not None and kind not in MEMORY_KINDS:
+            return {'ok': False, 'reason': 'bad_kind'}
         with self.transaction() as conn:
             row = self.get_memory(table, memory_id)
             if row is None:
@@ -1589,12 +1598,17 @@ class MemoryStore:
             if require_orphan and (row.get('status') != 'pending'
                                   or row.get('conflict_group')):
                 return {'ok': False, 'reason': 'not_orphan'}
+            if require_unpinned_active and (row.get('pinned')
+                                            or row.get('status') != 'active'):
+                return {'ok': False, 'reason': 'not_active_unpinned'}
             if row.get('status') == 'pending' and not allow_pending:
                 return {'ok': False, 'reason': 'resolve_conflict_first'}
             now = _now()
             updates: dict[str, Any] = {'updated_at': now}
             if status is not None:
                 updates['status'] = status
+            if kind is not None:
+                updates['kind'] = kind
             if pinned is not None:
                 updates['pinned'] = 1 if pinned else 0
                 if pinned:
@@ -1626,8 +1640,10 @@ class MemoryStore:
             self._rebuild_semantic_links(memory_id)
         return {'ok': True, 'revision': revision, 'item': after}
 
-    def confirm_memory(self, table: str, memory_id: str) -> dict[str, Any]:
-        return self.set_memory_state(table, memory_id, confirm=True, action='confirm')
+    def confirm_memory(self, table: str, memory_id: str, *,
+                       kind: str | None = None) -> dict[str, Any]:
+        return self.set_memory_state(
+            table, memory_id, confirm=True, action='confirm', kind=kind)
 
     def set_pinned(self, table: str, memory_id: str, pinned: bool) -> dict[str, Any]:
         return self.set_memory_state(table, memory_id, pinned=pinned, action='pin')

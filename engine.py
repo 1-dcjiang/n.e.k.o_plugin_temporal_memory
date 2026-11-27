@@ -6,16 +6,18 @@ v0.4 不再自动往对话里推记忆。写入只落本插件库；只有模型
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Iterable
 from typing import Any
 
 from . import retrieval, scoring
-from .memory_store import MAX_TOTAL_MEMORIES, MemoryCapacityError, MemoryStore
+from .memory_store import MemoryCapacityError, MemoryStore
 
 MAX_EXPORT_ROWS_PER_TABLE = 10000
 MAX_HYPOTHESES = 200
+_LOG = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     'enabled': True,
@@ -66,12 +68,38 @@ def _is_sensitive(item: dict[str, Any], table: str) -> bool:
     tag_set = {tag.strip() for tag in tags.split(',') if tag.strip()}
     if tag_set & SENSITIVE_TAGS:
         return True
-    text = item.get('quote') or item.get('summary') or item.get('content') or ''
-    if is_sensitive_text(text):
-        return True
+    for key in ('quote', 'summary', 'content'):
+        if is_sensitive_text(item.get(key)):
+            return True
     if table == 'anchors' and float(item.get('emotion') or 0.0) >= 0.75:
         return True
     return False
+
+
+def _redact_working_turns(turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """导出/清除时连同敏感用户发言的紧邻助手回复一起过滤，避免复述泄露日期。"""
+    kept: list[dict[str, Any]] = []
+    redacted = 0
+    previous_user_sensitive = False
+    for turn in turns:
+        role = str(turn.get('role') or '').lower()
+        is_user = role in {'用户', 'user'}
+        is_assistant = role in {'助手', 'assistant'}
+        hit = is_sensitive_text(turn.get('content'))
+        if is_assistant and previous_user_sensitive:
+            hit = True
+        if hit:
+            redacted += 1
+            previous_user_sensitive = is_user
+            continue
+        kept.append(turn)
+        previous_user_sensitive = False
+    return kept, redacted
+
+
+def _hypothesis_age_base(item: dict[str, Any]) -> int:
+    """假设区寿命按真实写入时间算；ts 可被模型传入，不能当保留期起点。"""
+    return int(item.get('created_at') or item.get('ts') or 0)
 
 
 def _event_key(source_event_id: str, source_kind: str) -> str:
@@ -87,6 +115,7 @@ class MemoryEngine:
     def __init__(self, db_path: str, settings: dict[str, Any] | None = None) -> None:
         self.settings = {**DEFAULT_SETTINGS, **(settings or {})}
         self.store = MemoryStore(db_path)
+        self._residue_purge_pending = False
 
     # ------------------------------------------------------------- 写入
 
@@ -98,6 +127,7 @@ class MemoryEngine:
             return {'skipped': 'disabled', 'turn_no': 0, 'anchored': False,
                     'anchor': None, 'semantics': []}
         event_key = _event_key(source_event_id, 'chat_turn')
+        result: dict[str, Any] | None = None
         try:
             with self.store.transaction():
                 if event_key:
@@ -108,11 +138,22 @@ class MemoryEngine:
                     if (self.store.find_anchor_by_event(event_key, 'chat_turn')
                             or self.store.semantics_for_event(event_key, 'chat_turn')):
                         return self._duplicate_result(event_key, 'chat_turn', manual=False)
-                return self._observe_turn(user_text, assistant_text, ts=ts,
-                                          source_event_id=event_key)
+                result = self._observe_turn(user_text, assistant_text, ts=ts,
+                                            source_event_id=event_key)
         except MemoryCapacityError:
             return {'skipped': 'capacity', 'turn_no': 0, 'anchored': False,
                     'anchor': None, 'semantics': []}
+        # 假设区淘汰的旧条目已删除，但 WAL/页残留收尾必须等事务提交后再做；
+        # 否则 purge 里的写事务会等待当前 observe 持到的写锁，超时后放弃。
+        if self._residue_purge_pending:
+            self._residue_purge_pending = False
+            try:
+                self.store.purge_delete_residue()
+            except Exception as exc:
+                _LOG.warning('假设区淘汰后的残留清理失败: %s', exc)
+        return result if result is not None else {
+            'skipped': 'no_result', 'turn_no': 0, 'anchored': False,
+            'anchor': None, 'semantics': []}
 
     def _duplicate_result(self, source_event_id: str, source_kind: str, *,
                           manual: bool) -> dict[str, Any]:
@@ -144,7 +185,7 @@ class MemoryEngine:
                                    'hypothesis': False,
                                    'anchor': None, 'semantics': [], 'turn_no': turn_no}
         if (scoring.is_hypothesis(user_text)
-                and result.score >= float(self.settings['anchor_threshold'])):
+                and result.raw_score >= float(self.settings['anchor_threshold'])):
             # 玩笑、假设、角色扮演设定单独进假设区：保留原话供核对，
             # 但不建事实/偏好、不参与召回，也不挤占锚点额度。
             anchor = self._create_hypothesis(user_text, ts=ts,
@@ -234,13 +275,14 @@ class MemoryEngine:
     def _create_hypothesis(self, user_text: str, *, ts: int, time_label: str,
                            tags: list[str], source_event_id: str = '') -> dict[str, Any]:
         """假设区条目：保留原话，但状态不是 active，召回和生命周期都不会碰它。"""
-        rows = [item for item in self.store.all_memories('anchors', MAX_TOTAL_MEMORIES)
-                if item.get('status') == 'hypothesis']
+        rows = self.store.all_memories('anchors', limit=None, statuses=('hypothesis',))
         if len(rows) >= MAX_HYPOTHESES:
             # 假设区也有上限：先删最老的，避免玩笑句无限占用明文库。
-            for item in sorted(rows, key=lambda row: int(row.get('ts') or 0))[
+            for item in sorted(rows, key=_hypothesis_age_base)[
                     :len(rows) - MAX_HYPOTHESES + 1]:
-                self.store.delete_permanent('anchors', item['id'])
+                if self.store.delete_permanent(
+                        'anchors', item['id'], purge_residue=False).get('ok'):
+                    self._residue_purge_pending = True
         return self.store.add_anchor(
             summary=scoring.summarize(
                 user_text, max_chars=int(self.settings['max_anchor_summary_chars'])),
@@ -423,7 +465,7 @@ class MemoryEngine:
         hypothesis_left = None
         if item.get('status') == 'hypothesis':
             hypothesis_left = max(0.0, (
-                int(item.get('ts') or 0) + retention * 86400 - now) / 86400)
+                _hypothesis_age_base(item) + retention * 86400 - now) / 86400)
         return {
             **item,
             'ts': int(item.get('ts') or item.get('created_at') or 0),
@@ -443,19 +485,14 @@ class MemoryEngine:
     # ------------------------------------------------------------- 面板维护
 
     def confirm(self, table: str, memory_id: str) -> dict[str, Any]:
-        result = self.store.confirm_memory(table, memory_id)
-        if result.get('ok') and table == 'anchors':
+        kind = None
+        if table == 'anchors':
             item = self.store.get_memory(table, memory_id)
             if item and item.get('kind') == 'hypothesis':
                 # 用户确认「假设」其实是真的：改回普通事件类型，避免面板/导出
-                # 一直把它当假设，也避免后续召回仍被 kind 误导。
-                self.store.revise_memory(
-                    table, memory_id, action='confirm',
-                    kind=scoring.classify_memory(item.get('quote') or ''))
-                item = self.store.get_memory(table, memory_id)
-                if item:
-                    result = {**result, 'item': item}
-        return result
+                # 一直把它当假设。kind 与 status 同一次更新，只留一条撤销记录。
+                kind = scoring.classify_memory(item.get('quote') or '')
+        return self.store.confirm_memory(table, memory_id, kind=kind)
 
     def pin(self, table: str, memory_id: str, pinned: bool) -> dict[str, Any]:
         return self.store.set_pinned(table, memory_id, pinned)
@@ -470,8 +507,10 @@ class MemoryEngine:
                        keep: bool = True) -> dict[str, Any]:
         return self.store.resolve_orphan_pending(table, memory_id, keep)
 
-    def delete_permanent(self, table: str, memory_id: str) -> dict[str, Any]:
-        return self.store.delete_permanent(table, memory_id)
+    def delete_permanent(self, table: str, memory_id: str, *,
+                         purge_residue: bool = True) -> dict[str, Any]:
+        return self.store.delete_permanent(
+            table, memory_id, purge_residue=purge_residue)
 
     def delete_working_turn(self, turn_id: int) -> dict[str, Any]:
         ok = self.store.delete_working_turn(turn_id)
@@ -494,8 +533,8 @@ class MemoryEngine:
             include_sensitive = bool(self.settings.get('export_sensitive_by_default', False))
         # 先取全量再过滤：如果先取 cap+1 再过滤，前 1 万条全是敏感条目时
         # 第 10001 条普通条目会被静默藏掉，truncated 也会误报。
-        anchors = self.store.all_memories('anchors', MAX_TOTAL_MEMORIES + 1)
-        semantics = self.store.all_memories('semantics', MAX_TOTAL_MEMORIES + 1)
+        anchors = self.store.all_memories('anchors', limit=None)
+        semantics = self.store.all_memories('semantics', limit=None)
         redacted = 0
         if not include_sensitive:
             kept_anchors = [item for item in anchors if not _is_sensitive(item, 'anchors')]
@@ -508,10 +547,8 @@ class MemoryEngine:
         window = 8 if window is None else max(0, int(window))
         working = self.store.recent_turns(window)
         if not include_sensitive:
-            kept_working = [turn for turn in working
-                            if not is_sensitive_text(turn.get('content'))]
-            redacted += len(working) - len(kept_working)
-            working = kept_working
+            working, working_redacted = _redact_working_turns(working)
+            redacted += working_redacted
         return {
             'exported_at': int(time.time()),
             'schema': 4,
@@ -529,15 +566,18 @@ class MemoryEngine:
         total = {'ok': True, 'anchors': 0, 'semantics': 0,
                  'working': 0, 'total': 0}
         for table in ('anchors', 'semantics'):
-            for item in self.store.all_memories(table, MAX_TOTAL_MEMORIES + 1):
+            for item in self.store.all_memories(table, limit=None):
                 if not _is_sensitive(item, table):
                     continue
                 result = self.store.delete_permanent(table, item['id'])
                 if result.get('ok'):
                     total[table] += 1
                     total['total'] += 1
-        for turn in self.store.all_working_turns():
-            if not is_sensitive_text(turn.get('content')):
+        all_turns = self.store.all_working_turns()
+        kept_turns, _ = _redact_working_turns(all_turns)
+        kept_ids = {int(turn['id']) for turn in kept_turns}
+        for turn in all_turns:
+            if int(turn['id']) in kept_ids:
                 continue
             if self.store.delete_working_turn(int(turn['id'])):
                 total['working'] += 1
@@ -555,17 +595,18 @@ class MemoryEngine:
         retention = max(1, int(self.settings.get('hypothesis_retention_days') or 14))
         cutoff = now - retention * 86400
         counts = {'hypotheses': 0, 'anchors': 0, 'semantics': 0}
-        anchors = self.store.all_memories('anchors', MAX_TOTAL_MEMORIES + 1)
+        anchors = self.store.all_memories('anchors', limit=None)
         for item in anchors:
-            if item.get('status') == 'hypothesis' and int(item.get('ts') or 0) < cutoff:
+            created = _hypothesis_age_base(item)
+            if item.get('status') == 'hypothesis' and created < cutoff:
                 if self.store.delete_permanent('anchors', item['id']).get('ok'):
                     counts['hypotheses'] += 1
         if not self.settings.get('consolidate_duplicates', True):
             return counts
         anchors = [item for item in self.store.all_memories(
-            'anchors', MAX_TOTAL_MEMORIES + 1) if item.get('status') == 'active']
+            'anchors', limit=None) if item.get('status') == 'active']
         semantics = [item for item in self.store.all_memories(
-            'semantics', MAX_TOTAL_MEMORIES + 1) if item.get('status') == 'active']
+            'semantics', limit=None) if item.get('status') == 'active']
         for table, items, text_key, count_key in (
                 ('anchors', anchors, 'quote', 'anchors'),
                 ('semantics', semantics, 'content', 'semantics')):
@@ -587,12 +628,10 @@ class MemoryEngine:
                     if duplicate.get('pinned'):
                         # 固定是用户明确要求长期保留，不参与自动去重。
                         continue
-                    current = self.store.get_memory(table, duplicate['id'])
-                    if not current or current.get('pinned') or current.get('status') != 'active':
-                        continue
                     result = self.store.set_memory_state(
                         table, duplicate['id'], status='archived',
-                        action='consolidate', record_revision=False)
+                        action='consolidate', record_revision=False,
+                        require_unpinned_active=True)
                     if result.get('ok'):
                         counts[count_key] += 1
         return counts

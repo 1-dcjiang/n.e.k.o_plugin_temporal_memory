@@ -38,7 +38,20 @@ REPO = _detect_repo()
 HAS_SDK = REPO is not None
 
 SCRIPT = r"""
-import temporal_memory as m
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["TM_PLUGIN_ROOT"])
+spec = importlib.util.spec_from_file_location(
+    "temporal_memory", root / "__init__.py",
+    submodule_search_locations=[str(root)],
+)
+m = importlib.util.module_from_spec(spec)
+sys.modules["temporal_memory"] = m
+assert spec.loader is not None
+spec.loader.exec_module(m)
 from plugin.sdk.plugin.llm_tool import collect_llm_tool_methods
 
 plugin = m.TemporalMemoryPlugin.__new__(m.TemporalMemoryPlugin)
@@ -54,9 +67,13 @@ for meta, _handler in collect_llm_tool_methods(plugin):
 
 @pytest.mark.skipif(not HAS_SDK, reason='没有 N.E.K.O 源码树，设置 NEKO_REPO 后重跑')
 def test_real_sdk_collects_timer_and_entries():
-    env = {**os.environ, 'PYTHONPATH': str(ROOT.parent)}
+    env = {**os.environ, 'TM_PLUGIN_ROOT': str(ROOT),
+           'PYTHONPATH': str(ROOT.parent)}
+    venv = (REPO / '.venv' / 'Scripts' / 'python.exe'
+            if os.name == 'nt' else REPO / '.venv' / 'bin' / 'python')
+    python = str(venv) if venv.exists() else sys.executable
     result = subprocess.run(
-        [sys.executable, '-c', SCRIPT],
+        [python, '-c', SCRIPT],
         cwd=str(REPO), env=env, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr

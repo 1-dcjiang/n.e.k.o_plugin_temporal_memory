@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from temporal_memory import scoring
 from temporal_memory.engine import MemoryEngine
@@ -20,7 +21,7 @@ def test_hypothesis_cues_are_conservative():
 
 
 def test_hypothesis_is_kept_but_not_recalled(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, {'anchor_threshold': 0.0})
     result = engine.observe('假设我是一只猫，你会怎么照顾我', ts=1000)
     assert result['hypothesis'] is True
     assert result['anchor']['status'] == 'hypothesis'
@@ -58,13 +59,14 @@ def test_token_budget_is_capped(tmp_path):
 
 
 def test_consolidate_expires_hypothesis_and_dedupes(tmp_path):
-    engine = _engine(tmp_path, {'hypothesis_retention_days': 14})
+    engine = _engine(tmp_path, {'hypothesis_retention_days': 14,
+                                'anchor_threshold': 0.0})
     engine.observe('假设我是一只猫', ts=1000)
     engine.store.add_semantic('我喜欢喝美式', tags=['咖啡'], kind='preference',
                               status='active', score=0.8)
     engine.store.add_semantic('我喜欢喝美式', tags=['咖啡'], kind='preference',
                               status='active', score=0.2)
-    counts = engine.consolidate(now=1000 + 15 * 86400)
+    counts = engine.consolidate(now=int(time.time()) + 15 * 86400)
     assert counts['hypotheses'] == 1
     assert counts['semantics'] == 1
     active = engine.store.all_memories('semantics', 10, statuses=('active',))

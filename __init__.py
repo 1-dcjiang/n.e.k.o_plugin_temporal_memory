@@ -45,13 +45,20 @@ MAX_EXPORT_TOTAL_ROWS = 20000
 MAX_TAGS = 6
 
 
-def _backup_has_sensitive(path: str) -> bool:
-    """只读扫描迁移备份 SQLite：命中敏感词就整份删除，避免旧库明文残留。"""
-    uri = f'file:{path}?mode=ro'
+def _backup_has_sensitive(path: str) -> bool | None:
+    """只读扫描迁移备份 SQLite：命中敏感词返回 True，干净返回 False。
+
+    打不开、损坏或结构不完整时返回 None，不能当成「无敏感」静默放行；
+    调用方会保守删除并单独统计，避免用户看到成功但明文备份还在。
+    """
+    try:
+        uri = Path(path).resolve().as_uri() + '?mode=ro'
+    except (OSError, ValueError):
+        return None
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=2.0)
     except sqlite3.Error:
-        return False
+        return None
     try:
         conn.execute('PRAGMA busy_timeout=2000')
         tables = {row[0] for row in conn.execute(
@@ -66,11 +73,11 @@ def _backup_has_sensitive(path: str) -> bool:
                 try:
                     rows = conn.execute(f'SELECT {column} FROM {table}')
                 except sqlite3.Error:
-                    continue
+                    return None
                 if any(is_sensitive_text(row[0]) for row in rows):
                     return True
     except sqlite3.Error:
-        return False
+        return None
     finally:
         conn.close()
     return False
@@ -1046,6 +1053,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError('清除里程碑/情感条目需要二次确认'))
         total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
                                  'working': 0, 'backups': 0,
+                                 'backups_unreadable': 0, 'backups_failed': 0,
                                  'total': 0, 'databases': 0, 'failed': 0}
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
@@ -1068,8 +1076,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
             total['databases'] += 1
             for key in ('anchors', 'semantics', 'working', 'total'):
                 total[key] += int(one.get(key) or 0)
-        total['backups'] = self._purge_sensitive_migration_backups()
-        total['ok'] = total['failed'] == 0
+        backup_stats = await asyncio.to_thread(
+            self._purge_sensitive_migration_backups)
+        total['backups'] = int(backup_stats.get('removed') or 0)
+        total['backups_unreadable'] = int(backup_stats.get('unreadable') or 0)
+        total['backups_failed'] = int(backup_stats.get('failed') or 0)
+        total['ok'] = total['failed'] == 0 and total['backups_failed'] == 0
         self._unloaded_cache = None
         return Ok(total)
 
@@ -1140,27 +1152,38 @@ class TemporalMemoryPlugin(NekoPluginBase):
             removed += 1
         return removed
 
-    def _purge_sensitive_migration_backups(self) -> int:
-        """清除敏感条目后，连带删除含敏感明文的迁移备份；无敏感的备份保留。"""
+    def _purge_sensitive_migration_backups(self) -> dict[str, int]:
+        """清除敏感条目后，连带删除含敏感明文的迁移备份；无敏感的备份保留。
+
+        无法读取的备份按「内容未知」保守删除，并单列计数，避免损坏文件
+        被当成无敏感而静默留下。返回值区分 removed/unreadable/failed。
+        """
+        stats = {'removed': 0, 'unreadable': 0, 'failed': 0}
         parent = os.path.dirname(self._db_path())
         try:
             names = os.listdir(parent)
-        except OSError:
-            return 0
-        removed = 0
+        except OSError as exc:
+            self.logger.warning('扫描迁移备份目录失败: %s', exc)
+            stats['failed'] = 1
+            return stats
         for name in names:
             if '.db.migrated' not in name:
                 continue
             path = os.path.join(parent, name)
+            sensitive: bool | None = None
             try:
-                if not _backup_has_sensitive(path):
+                sensitive = _backup_has_sensitive(path)
+                if sensitive is False:
                     continue
                 os.remove(path)
             except OSError as exc:
                 self.logger.warning('删除含敏感内容的迁移备份失败(%s): %s', name, exc)
+                stats['failed'] += 1
                 continue
-            removed += 1
-        return removed
+            stats['removed'] += 1
+            if sensitive is None:
+                stats['unreadable'] += 1
+        return stats
 
     @ui.action(label='清理旧记忆', refresh_context=True)
     @plugin_entry(

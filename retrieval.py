@@ -199,7 +199,9 @@ def _rank_anchors(anchors: list[dict[str, Any]], now: int | None = None) -> list
     for index, anchor in enumerate(anchors):
         relevance = 1.0 - (index / max(1, total))
         age_days = max(0.0, (now - int(anchor.get('ts') or now)) / 86400)
-        recency = 0.5 ** (age_days / 30.0)
+        # 固定条目是用户明确要求长期保留，不参与近因衰减；否则一年前的固定项
+        # 会被几条新弱匹配挤出候选，和「固定不衰减」的产品口径冲突。
+        recency = 1.0 if anchor.get('pinned') else 0.5 ** (age_days / 30.0)
         score = max(0.05, float(anchor.get('score') or 0.05))
         frequency = 1.0 + min(4, int(anchor.get('recall_count') or 0)) * 0.1
         ranked.append((relevance * recency * score * frequency, index, anchor))
@@ -209,17 +211,6 @@ def _rank_anchors(anchors: list[dict[str, Any]], now: int | None = None) -> list
 
 def _clip(line: str, limit: int) -> str:
     return line if len(line) <= limit else line[: limit - 1] + '…'
-
-
-def _trim_block(block: str, max_chars: int, max_tokens: int) -> str:
-    """最后一道硬上限：标题/闭合标签也计入，超出就从正文尾部丢行。"""
-    lines = block.splitlines()
-    while len(lines) > 4 and (len('\n'.join(lines)) > max_chars
-                              or _estimate_tokens('\n'.join(lines)) > max_tokens):
-        lines.pop(-2)
-        if len(lines) > 2 and lines[-2].startswith('## '):
-            lines.pop(-2)
-    return '\n'.join(lines)
 
 
 def _trim_block(block: str, max_chars: int, max_tokens: int) -> str:
@@ -280,10 +271,10 @@ def _fit_budget(lines: list[str], budget: int, token_budget: int | None = None) 
             total_tokens += _estimate_tokens(line)
             continue
         if total + len(line) + 1 > budget:
-            continue
+            break
         line_tokens = _estimate_tokens(line)
         if token_budget is not None and total_tokens + line_tokens > token_budget:
-            continue
+            break
         kept.append(line)
         total += len(line) + 1
         total_tokens += line_tokens

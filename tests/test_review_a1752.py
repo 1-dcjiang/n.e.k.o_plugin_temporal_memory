@@ -54,7 +54,7 @@ def test_low_score_hypothesis_is_not_written(tmp_path):
 
 
 def test_hypothesis_does_not_spend_timeline_capacity(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, {'anchor_threshold': 0.0})
     normal = engine.remember('我养了一只猫叫团子', ts=1000)
     assert normal['anchor']['status'] == 'active'
     engine.observe('假设我是一只猫，你会怎么照顾我', ts=1001)
@@ -149,7 +149,8 @@ def test_clear_sensitive_purges_only_sensitive_migration_backup(tmp_path):
         conn.execute('INSERT INTO anchors VALUES (?, ?)', (text, text))
         conn.commit()
         conn.close()
-    assert plugin._purge_sensitive_migration_backups() == 1
+    stats = plugin._purge_sensitive_migration_backups()
+    assert stats == {'removed': 1, 'unreadable': 0, 'failed': 0}
     assert not (data_dir / 'memory.db.migrated').exists()
     assert (data_dir / 'memory-safe.db.migrated').exists()
 
@@ -195,6 +196,7 @@ def test_char_budget_is_a_hard_cap(tmp_path):
         engine.remember(f'眼药水记录 {index} ' + '别揉眼睛' * 20, ts=1000 + index)
     result = engine.recall('眼药水')
     assert result['prompt_block'].strip()
+    assert '眼药水' in result['prompt_block']
     assert result['chars'] <= 200
 
 
@@ -209,7 +211,7 @@ def test_export_does_not_hide_plain_rows_behind_sensitive_rows(tmp_path):
 
 
 def test_confirm_hypothesis_changes_kind_and_becomes_recallable(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, {'anchor_threshold': 0.0})
     result = engine.observe('假设我是一只猫，你会怎么照顾我', ts=1000)
     anchor = result['anchor']
     assert anchor['kind'] == 'hypothesis'

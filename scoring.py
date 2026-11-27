@@ -51,6 +51,7 @@ class ScoreResult:
     emotion: float = 0.0
     tags: list[str] = field(default_factory=list)
     is_mundane: bool = False
+    raw_score: float = 0.0
 
     @property
     def should_anchor(self) -> bool:
@@ -122,6 +123,7 @@ def score_turn(user_text: str, assistant_text: str = '',
 
     if is_hypothesis(user):
         # 假设句也要过阈值才落库；否则「假设明天可能下雨」这种闲聊会绕开稀疏策略。
+        # raw_score 不包含这 0.35，避免固定加分让阈值形同虚设。
         signals.append('hypothesis')
         total += 0.35
 
@@ -130,15 +132,18 @@ def score_turn(user_text: str, assistant_text: str = '',
     if mundane:
         total = 0.0
 
+    raw = min(1.0, total - (0.35 if 'hypothesis' in signals else 0.0))
     emotion = emotion_weight(user, signals)
     if emotion >= 0.9:
         total += 0.15  # 强情绪单独加分，避免被长句摊薄
+        raw = min(1.0, raw + 0.15)
     return ScoreResult(
         score=min(1.0, total),
         signals=signals,
         emotion=emotion,
         tags=extract_tags(user),
         is_mundane=mundane,
+        raw_score=raw,
     )
 
 
@@ -200,18 +205,29 @@ HYPOTHESIS_FIRST_PERSON: tuple[str, ...] = (
 # 「如果」「要是」「设定」「测试一下」单独出现不再算假设：
 # 前者常是条件规则（记住，如果我说红色就停），后者常是闹钟/日程。
 HYPOTHESIS_ROLE_PATTERN = re.compile(
-    r'(?:如果|要是).{0,12}(?:你当|你扮演|你变成|你是)')
+    r'(?:如果|要是).{0,12}(?:你当|你扮演|你变成|你来当|你来扮演|你饰演|你演)')
 HYPOTHESIS_SETTING_PATTERN = re.compile(
     r'设定(?:一个|个)?(?:角色|场景|世界|规则|人设|剧情|故事)')
 EXPLICIT_MEMORY_PATTERN = re.compile(
-    r'记住|记下|别忘|不要忘|务必记住|remember', re.IGNORECASE)
+    r'记住|记下|别忘|不要忘|务必记住|记得|很重要|务必|remember', re.IGNORECASE)
 _HYPOTHESIS_ASCII = re.compile(
-    r'\b(?:what if|suppose|pretend|role ?play|hypothetically)\b', re.IGNORECASE)
+    r'\bwhat if\b|\bhypothetically\b|\bpretend\b|\brole ?play\b|'
+    r'\bsuppose (?:that )?i (?:am|was|were|become)\b',
+    re.IGNORECASE)
 
 
 def is_explicit_memory(text: str) -> bool:
     """显式「记住/别忘」优先：这类句子即使带「如果」也必须是事实，不是假设。"""
     return bool(EXPLICIT_MEMORY_PATTERN.search(_normalize(text)[:80]))
+
+
+def _fact_before_hypothesis(text: str) -> bool:
+    """「我对花生过敏，如果我是在外面吃饭…」前半句是事实，不是假设场景。"""
+    match = re.search(r'如果|要是', text)
+    if not match or match.start() == 0:
+        return False
+    prefix = text[:match.start()]
+    return any(cue in prefix for cue in PREFERENCE_CUES + FACT_CUES + SEMANTIC_CUES)
 
 
 def is_hypothesis(text: str) -> bool:
@@ -227,10 +243,12 @@ def is_hypothesis(text: str) -> bool:
         return False
     if is_explicit_memory(normalized):
         return False
+    if _fact_before_hypothesis(normalized):
+        return False
     head = normalized[:80].lower()
     if any(head.startswith(cue) for cue in HYPOTHESIS_PREFIX_CUES):
         return True
-    if any(cue in head for cue in HYPOTHESIS_FIRST_PERSON):
+    if any(head.startswith(cue) for cue in HYPOTHESIS_FIRST_PERSON):
         return True
     if HYPOTHESIS_ROLE_PATTERN.search(head):
         return True

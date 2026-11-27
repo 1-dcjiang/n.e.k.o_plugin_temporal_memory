@@ -329,7 +329,21 @@ export default function TemporalMemorySettings(
     const result = await act("clear_sensitive_memories", { confirmed: true },
       t("ui.action.clear_sensitive"))
     if (result?.ok) {
-      setNotice(t("ui.notice.clear_sensitive_done", { total: result.total ?? 0 }))
+      const unreadable = result.backups_unreadable ?? 0
+      setNotice(t("ui.notice.clear_sensitive_done", {
+        total: result.total ?? 0,
+        anchors: result.anchors ?? 0,
+        semantics: result.semantics ?? 0,
+        working: result.working ?? 0,
+        backups: result.backups ?? 0,
+        backup_note: unreadable > 0
+          ? t("ui.notice.clear_sensitive_unreadable", { count: unreadable })
+          : "",
+      }))
+    } else if ((result?.backups_failed ?? 0) > 0) {
+      setNotice(t("ui.notice.clear_sensitive_backup_failed", {
+        count: result.backups_failed,
+      }))
     }
   }
 

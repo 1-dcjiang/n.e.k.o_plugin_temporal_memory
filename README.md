@@ -29,16 +29,16 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.6.1 已发布 GitHub Release（Latest），源码提交 `302eb90`。A1752 深审修复随 0.6.1 发布，新增 `tests/test_review_a1752.py`，全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；GitHub Actions Verify 与 Release 均成功。N.E.K.O Market 通知因市场端 GitHub API 502 暂时失败，线上仍显示 v0.6.0，待市场恢复后同步。
+> 当前状态：v0.6.1 已发布 GitHub Release（Latest），源码提交 `302eb90`。A1752 深审修复随 0.6.1 发布，新增 `tests/test_review_a1752.py`，全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；GitHub Actions Verify 与 Release 均成功。A1755 增量复审修复已进 `main`、尚未发版，新增 `tests/test_review_a1755.py` 16 项，全量 275 项测试（274 passed + 1 skipped）。N.E.K.O Market 通知因市场端 GitHub API 502 暂时失败，线上仍显示 v0.6.0，待市场恢复后同步。
 
 ## v0.6.0 新增能力
 
 - **召回分清职责**：`recall_temporal_memory` 的工具描述明确只查本插件保存的用户原话证据和已确认条目；宿主聊天记录、本体记忆走 `recall_memory`。返回块头部写明「用户原话 / 插件推断 / 没记录就说不记得」，推断必须用推测口吻。
-- **情境假设区**：命中「假设 / 假如 / 角色扮演 / what if」等线索的原话写入 `status='hypothesis'`，保留 14 天，不建语义、不参与召回；面板单独可见，可纠正误判。
-- **加权召回 + token 预算**：锚点按相关度、近因、score、recall_count 加权排序；召回同时受 `recall_char_budget` 与 `recall_token_budget` 硬上限约束，返回 `tokens` / `token_budget`。
-- **离线整理**：定时维护会删除过期假设，并对同表、同 kind、完全同文的 active 条目去重归档；不合并正文不同的近似项，不跨角色库。
-- **敏感导出过滤**：正文命中生日、纪念日、婚礼、告白等词，标签含里程碑/情感，或锚点 `emotion ≥ 0.75` 的条目默认不导出；工作记忆里的同一句原话也过滤，面板可切换「含敏感条目」。
-- **合规清除**：新增 `clear_sensitive_memories`（需 `confirmed=true`），枚举磁盘上全部角色库，永久删除敏感锚点、偏好/事实和工作记忆原话；含敏感内容的 `*.migrated` 迁移备份会整份删除。
+- **情境假设区**：只在句首命中「假设 / 假如 / 角色扮演 / what if」，或出现明确的「如果 + 你扮演/你当」时写入 `status='hypothesis'`；真实事实/偏好在前、条件在后的句子（如「我对花生过敏，如果…」）不进假设区。假设句去掉假设加分后仍须过 `anchor_threshold` 才落库，保留 14 天，不建语义、不参与召回；面板单独可见，可纠正误判。
+- **加权召回 + token 预算**：锚点按相关度、近因、score、recall_count 加权排序；固定条目不参与近因衰减。召回同时受 `recall_char_budget` 与 `recall_token_budget` 硬上限约束，返回 `tokens` / `token_budget`。
+- **离线整理**：定时维护会按真实写入时间删除过期假设，并对同表、同 kind、完全同文的 active 条目去重归档；不合并正文不同的近似项，不跨角色库。
+- **敏感导出过滤**：正文（quote/summary/content 任一字段）命中生日、纪念日、婚礼、告白等词，标签含里程碑/情感，或锚点 `emotion ≥ 0.75` 的条目默认不导出；工作记忆里的敏感原话及紧邻的助手复述也过滤，面板可切换「含敏感条目」。
+- **合规清除**：新增 `clear_sensitive_memories`（需 `confirmed=true`），枚举磁盘上全部角色库，永久删除敏感锚点、偏好/事实以及命中的工作记忆原话和紧邻助手回复；导出/清除按全表扫描，不再停在第 5001 行。含敏感内容的 `*.migrated` 迁移备份会整份删除，无法读取的备份保守删除并单列计数。
 
 > 旧状态（v0.5.19）：已上架市场，明确标注对记忆的影响；沿用 v0.5.18 的删除收尾：sqlite 3.44+ 启用 FTS5 `secure-delete`（低版本删除后 `optimize`），每次单条删除后 `wal_checkpoint(TRUNCATE)` 截断 WAL，并用唯一词 `zq7x9k` 扫 `.db` / `-wal` 字节验证不残留。
 
