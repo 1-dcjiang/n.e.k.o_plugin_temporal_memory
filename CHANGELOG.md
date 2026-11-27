@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased（A1752 深审修复）
+## 0.6.1（A1752 深审修复）
 
 - A1 假设误判：假设线索只在句首或「假设类动词 + 第一人称/角色」命中，`如果/要是/设定/测试一下` 单独出现不再算假设；显式「记住/别忘」优先；假设句必须过 `anchor_threshold` 才落库，假设区上限 200 条。
 - A2 加权召回：候选池改为 `max_anchors × 4` 后再按相关度、近因、score、召回次数排序；去掉按 `ts` 的二次重排，预算裁剪先丢低权重尾部。
@@ -11,6 +11,7 @@
 - A7 其他：导出先取全量再过滤，避免 `truncated` 误报；`consolidate` 扫描全部 active；假设确认后改回普通 kind；面板显示假设删除倒计时；`recall_temporal_memory` 返回 `tokens/token_budget`；`observe` 结果暴露 `hypothesis`。
 - B 类：`purge_stale` 提交后统一做一次 WAL/FTS 收尾；去掉 `export_memories` 的 `TypeError` 无参回退；去重前复查 `pinned/status`；测试包名不依赖克隆目录名。
 - 测试：新增 `tests/test_review_a1752.py` 17 项，覆盖上述回归；同步修正 token 预算与导出测试。
+- 版本 0.6.1。
 
 ## 0.6.0
 
