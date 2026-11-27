@@ -29,7 +29,7 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.6.0 已发布（GitHub Release + N.E.K.O Market）。在 v0.5.19 的「对记忆的影响」声明与删除收尾之上，新增六项可独立升级的能力：召回置信度措辞与职责边界、情境假设区、加权召回 + token 预算、离线整理、敏感导出过滤与清除入口。v0.6.0 新增 `tests/test_upgrade_060.py`；A1752 深审修复后又新增 `tests/test_review_a1752.py`，当前全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；Hosted TSX 实机渲染仍需在插件面板里复核。
+> 当前状态：v0.6.0 已发布（GitHub Release + N.E.K.O Market）。A1752 深审修复已提交到 `main`（`4abec1e`），尚未另发版本；`plugin.toml` 仍是 0.6.0。修复新增 `tests/test_review_a1752.py`，当前全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；Hosted TSX 实机渲染仍需在插件面板里复核。
 
 ## v0.6.0 新增能力
 
