@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased（A1755 增量复审修复）
+## 0.6.2（A1755 增量复审修复）
 
 - A1 假设判定：`如果我是/如果让你` 只在句首命中；移除过宽的「你是」角色正则；`I suppose` 不再命中；显式记忆增加「记得/很重要/务必」；句首条件前已有事实/偏好（如「我对花生过敏，如果…」）不判假设，保留语义。
 - 假设阈值：`ScoreResult.raw_score` 去掉固定 +0.35 后再比 `anchor_threshold`，裸假设句默认不落库；假设区淘汰在事务内只删行，提交后统一收尾 WAL/FTS；查询改为 `statuses=('hypothesis',), limit=None`。
@@ -13,7 +13,7 @@
 - 假设寿命：按 `created_at` 而不是模型可传的 `ts` 计算保留期与面板倒计时。
 - 清理重复的 `_trim_block`（F811）；面板清除完成提示补齐 `working/backups/backups_unreadable` 占位符。
 - 测试：新增 `tests/test_review_a1755.py` 16 项；`test_real_sdk` 子进程改用 `TM_PLUGIN_ROOT` 显式装载包，独立检出目录名不再影响导入。
-- 版本待发布。
+- 版本 0.6.2。
 
 ## 0.6.1（A1752 深审修复）
 
