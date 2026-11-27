@@ -327,3 +327,11 @@
 - 短描述同步「会写入本机记忆」；README 新增「对记忆的影响（上架说明）」五段。
 - 测试：`test_market_readiness.py` 锁定 README 影响段与 `plugin.toml` 影响声明。
 - 流程：构建 0.5.19 → GitHub Release → `neko-plugin publish market <release-url>`。
+
+## 36. 六项可独立升级（0.6.0）
+
+- 范围：只做路线图中「可直接单独升级」的六项（P0-3 置信度措辞、P0-2 工具职责、P1-1 假设区、P1-4 加权召回 + token 预算、P2-1 离线巩固、P2-3 合规导出/清除）。
+- 未做：P0-1 订阅 `watch()`（需真机原型验证事件字段）、P1-2 关系里程碑、P1-3 纠错闭环、P2-2 主动提醒纪念日（需先划作者边界）。
+- 实现：`retrieval` 标签与 token 预算；`scoring.is_hypothesis()`；`engine.consolidate()` / `_is_sensitive()` / `export(include_sensitive)` / `clear_sensitive()`；插件 `clear_sensitive_memories`；面板与中英 i18n 同步。
+- 验收：`tests/test_upgrade_060.py` 7 项；全量 242 项（241 passed + 1 skipped）；`ruff`、`check --strict`、`check --release` 通过。
+- 版本 0.6.0。

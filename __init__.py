@@ -253,9 +253,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
     @llm_tool(
         name='recall_temporal_memory',
         description=(
-            '按需检索长期时序记忆。仅当用户提到「上次」「之前」「你还记得吗」，'
+            '按需检索本插件私有库里的长期时序记忆。仅当用户提到「上次」「之前」「你还记得吗」，'
             '或当前问题确实需要旧偏好、旧决定、跨天上下文时调用。'
-            '返回 active 条目及其原话证据；休眠、待确认冲突和已移除的条目不会返回。'
+            '只查本插件保存的用户原话证据和确认过的条目；不要用它查宿主聊天记录或本体记忆，'
+            '那是 recall_memory 的职责，两个工具不要混用。'
+            '返回 active 条目及原话证据；休眠、待确认冲突、假设区和已移除条目不会返回。'
+            '标「插件推断」的条目不是用户原句，请用推测口吻；没有记录就说「不记得」，不要补写。'
             '不要逐字念给用户听。'
         ),
         parameters={
@@ -378,7 +381,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
             flags = (orphan_truncated, archived_truncated)
             try:
                 for item in engine.list_memories(
-                        300, statuses=('active', 'dormant')):
+                        300, statuses=('active', 'dormant', 'hypothesis')):
                     item['character'] = character
                     memories.append(item)
                 batch = engine.list_memories(121, statuses=('archived',))
@@ -715,14 +718,25 @@ class TemporalMemoryPlugin(NekoPluginBase):
     @plugin_entry(
         id='export_memories',
         name='导出记忆',
-        description='导出全部记忆与原话证据（JSON），只含本插件私有库。',
-        input_schema={'type': 'object', 'properties': {}},
+        description='导出记忆与原话证据（JSON），只含本插件私有库；默认不导出里程碑/情感类条目。',
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'include_sensitive': {
+                    'type': 'boolean',
+                    'description': '是否包含里程碑/情感类条目，默认 false',
+                },
+            },
+        },
         metadata={'agent_hidden': True},
     )
-    async def export_memories(self, **_):
+    async def export_memories(self, include_sensitive: bool | None = None, **_):
+        if include_sensitive is None:
+            include_sensitive = bool(self._settings.get('export_sensitive_by_default', False))
         payload: dict[str, Any] = {'exported_at': 0, 'schema': 4,
                                    'anchors': [], 'semantics': [],
-                                   'working_memory': []}
+                                   'working_memory': [], 'redacted_sensitive': 0,
+                                   'include_sensitive': bool(include_sensitive)}
         truncated = {'anchors': False, 'semantics': False, 'total': False}
         failures: list[str] = []
         databases = 0
@@ -739,7 +753,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
                         opened = await asyncio.to_thread(
                             MemoryEngine, path, dict(self._settings))
                         engine = opened
-                    one = await asyncio.to_thread(engine.export)
+                    try:
+                        one = await asyncio.to_thread(
+                            engine.export, include_sensitive=bool(include_sensitive))
+                    except TypeError:
+                        # 测试/旧实现可能还是无参 export；退回旧的默认行为。
+                        one = await asyncio.to_thread(engine.export)
                     character = engine.store.get_owner() or ''
                 except Exception as exc:
                     failures.append(os.path.basename(path))
@@ -751,6 +770,7 @@ class TemporalMemoryPlugin(NekoPluginBase):
                         await asyncio.to_thread(opened.store.close)
                 databases += 1
                 payload['exported_at'] = max(payload['exported_at'], one['exported_at'])
+                payload['redacted_sensitive'] += int(one.get('redacted_sensitive') or 0)
                 one_truncated = one.get('truncated') or {}
                 for table in ('anchors', 'semantics'):
                     truncated[table] = truncated[table] or bool(one_truncated.get(table))
@@ -963,6 +983,48 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError(self._engine_error(character)))
         self._unloaded_cache = None
         return Ok({'ok': True, 'path': target, 'character': character})
+
+    @ui.action(label='清除里程碑/情感条目', tone='danger', refresh_context=True)
+    @plugin_entry(
+        id='clear_sensitive_memories',
+        name='清除里程碑/情感条目',
+        description='永久清除所有角色库里的里程碑/情感类条目；不可撤销，需面板二次确认。',
+        input_schema={
+            'type': 'object',
+            'properties': {'confirmed': {'type': 'boolean'}},
+            'required': ['confirmed'],
+        },
+        metadata={'agent_hidden': True},
+    )
+    async def clear_sensitive_memories(self, confirmed: bool = False, **_):
+        if not confirmed:
+            return Err(SdkError('清除里程碑/情感条目需要二次确认'))
+        total: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
+                                 'total': 0, 'databases': 0, 'failed': 0}
+        loaded = {os.path.abspath(engine.store.db_path): engine
+                  for engine in self._engines.values()}
+        for path in self._db_file_paths():
+            engine = loaded.get(path)
+            opened = None
+            try:
+                if engine is None:
+                    opened = await asyncio.to_thread(
+                        MemoryEngine, path, dict(self._settings))
+                    engine = opened
+                one = await asyncio.to_thread(engine.clear_sensitive)
+            except Exception as exc:
+                total['failed'] += 1
+                self.logger.warning('清除敏感条目失败: %s', exc)
+                continue
+            finally:
+                if opened is not None:
+                    await asyncio.to_thread(opened.store.close)
+            total['databases'] += 1
+            for key in ('anchors', 'semantics', 'total'):
+                total[key] += int(one.get(key) or 0)
+        total['ok'] = total['failed'] == 0
+        self._unloaded_cache = None
+        return Ok(total)
 
     @ui.action(label='清空全部记忆', tone='danger', refresh_context=True)
     @plugin_entry(

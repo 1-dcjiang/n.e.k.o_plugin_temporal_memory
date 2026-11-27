@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+按「temporal_memory 可单独升级的部分」路线图，收口六项不依赖订阅钩子/跨作者边界的能力：
+
+- 召回置信度措辞：`retrieval` 返回块改为 `[时间｜salience｜用户原话]` / `[插件推断]` 分离标注，头部明确「没记录就说不记得」、推断用推测口吻。
+- 召回工具分清：`recall_temporal_memory` 描述写明只查本插件原话证据与已确认条目，宿主聊天记录/本体记忆走 `recall_memory`。
+- 情境假设区：`scoring.is_hypothesis()` 识别假设/扮演/what if 等线索；命中后写入 `status='hypothesis'`、保留 14 天、不建语义、不参与召回，面板可查看与纠正。
+- 加权召回 + token 预算：锚点按相关度 × 近因 × score × recall_count 排序；同时用 `recall_char_budget` 与 `recall_token_budget` 硬裁，返回 `tokens` / `token_budget`。
+- 离线巩固：`engine.consolidate()` 清理过期假设，并对同表、同 kind、完全同文的 active 条目只保留分数/最近确认最高的一条，其余归档；不合并近似项、不跨角色库。
+- 合规导出/清除：标签含里程碑/纪念日/生日/周年/情感或 `emotion ≥ 0.75` 的条目默认不导出，`export_memories(include_sensitive=...)` 可显式包含；新增 `clear_sensitive_memories`（需 `confirmed=true`）。
+- 面板与 i18n：新增假设区状态/类型标签、召回 token 预算与假设保留天数配置、导出「含敏感条目」开关、清除敏感记忆按钮；中英 key 同步。
+- 测试：新增 `tests/test_upgrade_060.py` 7 项，覆盖假设识别与不召回、标签文案、token 预算、离线整理、敏感导出/清除、插件入口二次确认；全量 pytest 与 `ruff check` 通过。
+- 未做（保持路线图边界）：P0-1 订阅 `watch()` 原型验证、P1-2 关系里程碑、P1-3 纠错闭环、P2-2 主动提醒纪念日。
+- 版本 0.6.0。
+
 ## 0.5.19
 
 上架 N.E.K.O 插件市场，并把「对记忆的影响」放到用户第一眼能看到的位置：

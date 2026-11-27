@@ -4,7 +4,7 @@ name = "时序记忆"
 description = "对记忆的影响：把模型每轮调用 observe 提交的原话以明文存进本机插件私有目录、按角色分库，不加密不上传、不自动注入对话；单条删除会擦释放页、清 FTS 旧段并截断 WAL，导出/迁移备份/磁盘快照仍可能是明文。功能：证据优先的分层时序记忆，原话摘录、事件/偏好到期休眠、手动保留不衰减、矛盾先待确认，只在需要时按需召回。注意：写入依赖模型每轮主动调用 observe，不调用就不记录（覆盖率不保证）；原话证据由模型提交、宿主不逐字校验。"
 short_description = "会写入本机记忆：原话明文存本地、按角色分库；删除清页面/FTS/WAL，导出与备份仍明文。需模型每轮 observe，按需召回。"
 keywords = ["记忆", "记住", "回忆", "时间线", "之前说过", "上次", "证据", "休眠", "memory", "timeline", "recall", "remember"]
-version = "0.5.19"
+version = "0.6.0"
 type = "plugin"
 entry = "plugin.plugins.temporal_memory:TemporalMemoryPlugin"
 
@@ -56,3 +56,7 @@ dormancy_preference_days = 180
 max_recall_anchors = 6
 max_recall_semantics = 12
 recall_char_budget = 1200
+recall_token_budget = 1200
+hypothesis_retention_days = 14
+export_sensitive_by_default = false
+consolidate_duplicates = true

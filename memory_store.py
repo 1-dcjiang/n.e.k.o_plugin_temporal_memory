@@ -125,8 +125,8 @@ CREATE INDEX IF NOT EXISTS idx_revisions_ts ON revisions(ts);
 """
 
 ANCHOR_SEARCH_MIN_CHARS = 2
-MEMORY_KINDS = ('event', 'preference', 'decision', 'fact')
-MEMORY_STATUSES = ('active', 'dormant', 'pending', 'archived')
+MEMORY_KINDS = ('event', 'preference', 'decision', 'fact', 'hypothesis')
+MEMORY_STATUSES = ('active', 'dormant', 'pending', 'archived', 'hypothesis')
 MAX_TOPIC_NEIGHBORS = 50
 MAX_TOPIC_TOTAL = 200
 MAX_TOTAL_MEMORIES = 5000

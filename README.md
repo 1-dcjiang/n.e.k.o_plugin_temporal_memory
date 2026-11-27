@@ -28,18 +28,29 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.5.19 上架市场，明确标注对记忆的影响：新增 README「对记忆的影响（上架说明）」，并把同一口径前置到中英插件描述（会写什么/不上传/删除范围/覆盖率）。沿用 v0.5.18 的删除收尾：sqlite 3.44+ 启用 FTS5 `secure-delete`（低版本删除后 `optimize`），每次单条删除后 `wal_checkpoint(TRUNCATE)` 截断 WAL，并用唯一词 `zq7x9k` 扫 `.db` / `-wal` 字节验证不残留（对照组保留旧行为，能搜到）。235 项测试（pytest 收集，含参数化；文件内 229 个 `def test_`）、`ruff`、`check --strict`、Hosted TSX、包内测试均通过。
+> 当前状态：v0.6.0 候选，在 v0.5.19 的「对记忆的影响」声明与删除收尾之上，新增六项可独立升级的能力：召回置信度措辞与职责边界、情境假设区、加权召回 + token 预算、离线整理、敏感导出过滤与清除入口。v0.6.0 新增 `tests/test_upgrade_060.py`，全量 242 项测试（241 passed + 1 skipped）、`ruff check`、市场就绪检查均通过；发布前仍需在装有 N.E.K.O 源码的机器上跑 `neko-plugin check --strict` 与 Hosted TSX。
+
+## v0.6.0 新增能力
+
+- **召回分清职责**：`recall_temporal_memory` 的工具描述明确只查本插件保存的用户原话证据和已确认条目；宿主聊天记录、本体记忆走 `recall_memory`。返回块头部写明「用户原话 / 插件推断 / 没记录就说不记得」，推断必须用推测口吻。
+- **情境假设区**：命中「假设 / 假如 / 角色扮演 / what if」等线索的原话写入 `status='hypothesis'`，保留 14 天，不建语义、不参与召回；面板单独可见，可纠正误判。
+- **加权召回 + token 预算**：锚点按相关度、近因、score、recall_count 加权排序；召回同时受 `recall_char_budget` 与 `recall_token_budget` 硬上限约束，返回 `tokens` / `token_budget`。
+- **离线整理**：定时维护会删除过期假设，并对同表、同 kind、完全同文的 active 条目去重归档；不合并正文不同的近似项，不跨角色库。
+- **敏感导出过滤**：标签含里程碑、纪念日、生日、周年、情感或锚点 `emotion ≥ 0.75` 的条目默认不导出；面板可切换「含敏感条目」。
+- **合规清除**：新增 `clear_sensitive_memories`（需 `confirmed=true`），对全部已加载角色库永久删除敏感条目。
+
+> 旧状态（v0.5.19）：已上架市场，明确标注对记忆的影响；沿用 v0.5.18 的删除收尾：sqlite 3.44+ 启用 FTS5 `secure-delete`（低版本删除后 `optimize`），每次单条删除后 `wal_checkpoint(TRUNCATE)` 截断 WAL，并用唯一词 `zq7x9k` 扫 `.db` / `-wal` 字节验证不残留。
 
 ## 目录
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.5.19）
+├── plugin.toml            # 插件元信息与配置项（v0.6.0）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
-├── scoring.py             # 打分、摘要、标签、类型识别、冲突判定（纯规则）
-├── retrieval.py           # 只读召回与字符预算裁剪
+├── scoring.py             # 打分、摘要、标签、类型识别、冲突判定、假设识别（纯规则）
+├── retrieval.py           # 只读召回、置信度标签、加权排序与字符/token 预算裁剪
 ├── engine.py              # 调度器：observe / remember / recall / 休眠与分层
 ├── tests/                 # 单测、迁移测试、真实 SDK 注册测试
 ├── dist/                  # .neko-plugin 包
@@ -66,11 +77,12 @@ uv run neko-plugin build temporal_memory --out temporal_memory.neko-plugin
 |---|---|---|---|
 | `observe` | 模型 | 每轮对话结束后 | 是否建锚点；只落本插件库，返回值仅供调用方核对证据 |
 | `remember` | 模型 | 用户明确说「记住 / 别忘」 | 写入的锚点与原话证据；`pinned=true` 长期保留 |
-| `recall_temporal_memory` | 模型 | 用户问「上次 / 之前 / 你还记得吗」或确实需要旧偏好 | 仅 active、带原话证据的摘要块 |
+| `recall_temporal_memory` | 模型 | 用户问「上次 / 之前 / 你还记得吗」或确实需要旧偏好 | 仅 active、带原话证据的摘要块；标注用户原话/插件推断，不返回假设区 |
 | `recall` / `timeline` | 设置页 | 面板预览 | `agent_hidden`，不向模型暴露 |
 | `confirm_memory` / `pin_memory` / `correct_memory` / `archive_memory` | 设置页 | 用户核对、固定、纠正、移除 | 单条动作结果 + 撤销记录 |
 | `resolve_conflict` | 设置页 | 用户处理矛盾 | 保留一条、其余归档 |
-| `undo_last` / `export_memories` | 设置页 | 撤销或导出 | 撤销最近一次面板动作 / JSON |
+| `undo_last` / `export_memories` | 设置页 | 撤销或导出 | 撤销最近一次面板动作 / JSON；导出可切换是否包含敏感条目 |
+| `clear_sensitive_memories` | 设置页 | 清除里程碑/纪念日/强情感条目 | `agent_hidden`，需 `confirmed` |
 | `delete_memory` / `clear_memories` | 设置页 | 单条永久删除或清空全部 | `agent_hidden`，需 `confirmed` |
 | `delete_working_turn` / `attach_database` | 设置页 | 删除一条工作记忆原文 / 载入未挂载的角色库 | `agent_hidden`，需 `confirmed`（载入不需要） |
 

@@ -25,5 +25,15 @@ dormancy_preference_days = 180
 max_recall_anchors = 6
 max_recall_semantics = 12
 recall_char_budget = 1200
+recall_token_budget = 1200
+
+# 假设区保留天数；超期由定时维护清理，假设条目不参与召回
+hypothesis_retention_days = 14
+
+# 导出默认是否包含里程碑/情感类条目；false 更安全
+export_sensitive_by_default = false
+
+# 定时维护是否对完全重复的 active 条目去重归档
+consolidate_duplicates = true
 
 # v0.4 不再有被动注入：不往对话里 push_message，只由模型显式调用召回工具

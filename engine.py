@@ -28,9 +28,32 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'max_recall_anchors': 6,
     'max_recall_semantics': 12,
     'recall_char_budget': 1200,
+    'recall_token_budget': 1200,
+    'hypothesis_retention_days': 14,
+    'export_sensitive_by_default': False,
+    'consolidate_duplicates': True,
 }
 
 CONFIRM_SIMILARITY = 0.92
+
+SENSITIVE_TAGS = frozenset({
+    '里程碑', '纪念', '纪念日', '第一次', '生日', '周年', '情感', '告白', '求婚',
+    'milestone', 'anniversary', 'birthday', 'emotional',
+})
+
+
+def _is_sensitive(item: dict[str, Any], table: str) -> bool:
+    """里程碑/情感类默认不导出；标签或高情绪锚点都算。
+
+    这是保守规则，不判断内容语义；用户可在导出面板显式勾选包含。
+    """
+    tags = str(item.get('tags') or '').lower().replace('，', ',')
+    tag_set = {tag.strip() for tag in tags.split(',') if tag.strip()}
+    if tag_set & SENSITIVE_TAGS:
+        return True
+    if table == 'anchors' and float(item.get('emotion') or 0.0) >= 0.75:
+        return True
+    return False
 
 
 def _event_key(source_event_id: str, source_kind: str) -> str:
@@ -100,7 +123,17 @@ class MemoryEngine:
             user_text, assistant_text,
             threshold=float(self.settings['anchor_threshold']))
         payload: dict[str, Any] = {'score': result.as_dict(), 'anchored': False,
+                                   'hypothesis': False,
                                    'anchor': None, 'semantics': [], 'turn_no': turn_no}
+        if scoring.is_hypothesis(user_text):
+            # 玩笑、假设、角色扮演设定单独进假设区：保留原话供核对，
+            # 但不建事实/偏好、不参与召回，也不挤占锚点额度。
+            anchor = self._create_hypothesis(user_text, ts=ts,
+                                             time_label=scoring.time_label(ts, result.tags),
+                                             tags=result.tags,
+                                             source_event_id=source_event_id)
+            payload.update({'hypothesis': True, 'anchor': anchor})
+            return payload
         anchor: dict[str, Any] = {}
         if result.should_anchor and result.score >= float(self.settings['anchor_threshold']):
             anchor = self._create_anchor(
@@ -174,6 +207,26 @@ class MemoryEngine:
             result['note'] = ('最近的工作记忆里没有这句用户原话，已放进「未分组待确认」：'
                               '核对后点「保留这条」才会进入召回。')
         return result
+
+    def _create_hypothesis(self, user_text: str, *, ts: int, time_label: str,
+                           tags: list[str], source_event_id: str = '') -> dict[str, Any]:
+        """假设区条目：保留原话，但状态不是 active，召回和生命周期都不会碰它。"""
+        return self.store.add_anchor(
+            summary=scoring.summarize(
+                user_text, max_chars=int(self.settings['max_anchor_summary_chars'])),
+            ts=ts,
+            time_label=time_label,
+            emotion=0.2,
+            salience='cold',
+            tags=tags,
+            pinned=False,
+            quote=user_text,
+            source_event_id=source_event_id,
+            source_kind='chat_turn',
+            kind='hypothesis',
+            score=0.1,
+            status='hypothesis',
+        )
 
     def _create_anchor(self, user_text: str, assistant_text: str,
                        score: scoring.ScoreResult, *, ts: int,
@@ -301,6 +354,7 @@ class MemoryEngine:
             max_anchors=int(self.settings['max_recall_anchors']),
             max_semantics=int(self.settings['max_recall_semantics']),
             budget_chars=int(self.settings['recall_char_budget']),
+            budget_tokens=int(self.settings['recall_token_budget']),
             exclude_ids=tuple(exclude_ids),
             count_as_recall=count_as_recall,
         )
@@ -346,6 +400,7 @@ class MemoryEngine:
             'next_sleep_days': None if item.get('pinned') else
             round(max(0.0, horizon - age_days), 1),
             'can_recall': item.get('status') == 'active' and bool(item.get('quote')),
+            'sensitive': _is_sensitive(item, table),
         }
 
     # ------------------------------------------------------------- 面板维护
@@ -383,10 +438,19 @@ class MemoryEngine:
     def undo(self) -> dict[str, Any]:
         return self.store.undo_last()
 
-    def export(self, max_rows: int = MAX_EXPORT_ROWS_PER_TABLE) -> dict[str, Any]:
+    def export(self, max_rows: int = MAX_EXPORT_ROWS_PER_TABLE, *,
+               include_sensitive: bool | None = None) -> dict[str, Any]:
         cap = max(1, int(max_rows))
+        if include_sensitive is None:
+            include_sensitive = bool(self.settings.get('export_sensitive_by_default', False))
         anchors = self.store.all_memories('anchors', cap + 1)
         semantics = self.store.all_memories('semantics', cap + 1)
+        redacted = 0
+        if not include_sensitive:
+            kept_anchors = [item for item in anchors if not _is_sensitive(item, 'anchors')]
+            kept_semantics = [item for item in semantics if not _is_sensitive(item, 'semantics')]
+            redacted = (len(anchors) - len(kept_anchors)) + (len(semantics) - len(kept_semantics))
+            anchors, semantics = kept_anchors, kept_semantics
         anchors_truncated = len(anchors) > cap
         semantics_truncated = len(semantics) > cap
         window = self.settings.get('working_window')
@@ -399,7 +463,65 @@ class MemoryEngine:
             'working_memory': self.store.recent_turns(window),
             'truncated': {'anchors': anchors_truncated,
                           'semantics': semantics_truncated},
+            'redacted_sensitive': redacted,
+            'include_sensitive': include_sensitive,
         }
+
+    def clear_sensitive(self) -> dict[str, Any]:
+        """永久清除里程碑/情感类条目；只在本插件私有库内执行，不可撤销。"""
+        total = {'ok': True, 'anchors': 0, 'semantics': 0, 'total': 0}
+        for table in ('anchors', 'semantics'):
+            for item in self.store.all_memories(table, MAX_EXPORT_ROWS_PER_TABLE):
+                if not _is_sensitive(item, table):
+                    continue
+                result = self.store.delete_permanent(table, item['id'])
+                if result.get('ok'):
+                    total[table] += 1
+                    total['total'] += 1
+        return total
+
+    def consolidate(self, now: int | None = None) -> dict[str, int]:
+        """只整理本插件自己的库：过期假设、完全重复条目。
+
+        - 假设区超过保留天数：永久删除（原话只用于核对情境，不是事实）。
+        - 同表、同 kind、完全同文的 active 条目：保留分数最高/最近确认的一条，其余归档。
+        不动正文不同的近似项，也不合并跨角色库，避免把用户的不同记忆揉成一条。
+        """
+        now = int(time.time()) if now is None else int(now)
+        retention = max(1, int(self.settings.get('hypothesis_retention_days') or 14))
+        cutoff = now - retention * 86400
+        counts = {'hypotheses': 0, 'anchors': 0, 'semantics': 0}
+        anchors = self.store.all_memories('anchors', MAX_EXPORT_ROWS_PER_TABLE)
+        for item in anchors:
+            if item.get('status') == 'hypothesis' and int(item.get('ts') or 0) < cutoff:
+                if self.store.delete_permanent('anchors', item['id']).get('ok'):
+                    counts['hypotheses'] += 1
+        if not self.settings.get('consolidate_duplicates', True):
+            return counts
+        anchors = [item for item in self.store.all_memories(
+            'anchors', MAX_EXPORT_ROWS_PER_TABLE) if item.get('status') == 'active']
+        semantics = [item for item in self.store.all_memories(
+            'semantics', MAX_EXPORT_ROWS_PER_TABLE) if item.get('status') == 'active']
+        for table, items, text_key, count_key in (
+                ('anchors', anchors, 'quote', 'anchors'),
+                ('semantics', semantics, 'content', 'semantics')):
+            groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for item in items:
+                key = (str(item.get('kind') or ''), str(item.get(text_key) or '').strip())
+                if key[1]:
+                    groups.setdefault(key, []).append(item)
+            for group in groups.values():
+                if len(group) < 2:
+                    continue
+                group.sort(key=lambda item: (
+                    -float(item.get('score') or 0.0),
+                    -int(item.get('last_confirmed_at') or 0),
+                    -int(item.get('created_at') or 0),
+                ))
+                for duplicate in group[1:]:
+                    if self.store.archive_memory(table, duplicate['id']).get('ok'):
+                        counts[count_key] += 1
+        return counts
 
     def purge_stale(self, *, archived_days: int = 30,
                     dormant_days: int = 365) -> dict[str, Any]:
@@ -424,7 +546,9 @@ class MemoryEngine:
 
     def maintenance(self, now: int | None = None) -> dict[str, Any]:
         slept = self.apply_lifecycle(now)
+        consolidated = self.consolidate(now)
         return {'slept': slept, 'retier': self.retier(now),
+                'consolidated': consolidated,
                 'pruned_events': self.store.prune_processed_events(now)}
 
     def stats(self) -> dict[str, Any]:

@@ -25,6 +25,10 @@ type MemoryConfig = {
   max_recall_anchors: number
   max_recall_semantics: number
   recall_char_budget: number
+  recall_token_budget: number
+  hypothesis_retention_days: number
+  export_sensitive_by_default: boolean
+  consolidate_duplicates: boolean
 }
 
 type MemoryItem = {
@@ -126,12 +130,15 @@ const NUMERIC_FIELDS: Array<{
   { key: "max_recall_anchors", label: "ui.field.max_recall_anchors.label", help: "ui.field.max_recall_anchors.help" },
   { key: "max_recall_semantics", label: "ui.field.max_recall_semantics.label", help: "ui.field.max_recall_semantics.help" },
   { key: "recall_char_budget", label: "ui.field.recall_char_budget.label", help: "ui.field.recall_char_budget.help" },
+  { key: "recall_token_budget", label: "ui.field.recall_token_budget.label", help: "ui.field.recall_token_budget.help" },
+  { key: "hypothesis_retention_days", label: "ui.field.hypothesis_retention_days.label", help: "ui.field.hypothesis_retention_days.help" },
 ]
 
 const STATUS_LABEL_KEY: Record<string, string> = {  active: "ui.status.active",
   dormant: "ui.status.dormant",
   pending: "ui.status.pending",
   archived: "ui.status.archived",
+  hypothesis: "ui.status.hypothesis",
 }
 
 const KIND_LABEL_KEY: Record<string, string> = {
@@ -139,6 +146,7 @@ const KIND_LABEL_KEY: Record<string, string> = {
   preference: "ui.kind.preference",
   decision: "ui.kind.decision",
   fact: "ui.kind.fact",
+  hypothesis: "ui.kind.hypothesis",
 }
 
 // 助手角色在历史数据里既可能是英文 role，也可能是中文值；用转义避免面板出现硬编码中文。
@@ -152,6 +160,7 @@ function isAssistantRole(role?: string): boolean {
 function statusTone(status?: string): "success" | "warning" | "danger" {
   if (status === "active") return "success"
   if (status === "pending") return "danger"
+  if (status === "hypothesis") return "warning"
   return "warning"
 }
 
@@ -198,6 +207,10 @@ export default function TemporalMemorySettings(
   const [editText, setEditText] = props.useLocalState("editText", () => "")
   const [editKind, setEditKind] = props.useLocalState("editKind", () => "")
   const [editTags, setEditTags] = props.useLocalState("editTags", () => "")
+  const [includeSensitive, setIncludeSensitive] = props.useLocalState(
+    "includeSensitive",
+    () => Boolean(config.export_sensitive_by_default ?? false),
+  )
   const [openId, setOpenId] = props.useLocalState("openId", () => "")
   const [notice, setNotice] = props.useLocalState("notice", () => "")
   const confirm = useConfirm()
@@ -282,7 +295,9 @@ export default function TemporalMemorySettings(
   }
 
   async function exportJson() {
-    const result: any = await props.api.call("export_memories", {})
+    const result: any = await props.api.call("export_memories", {
+      include_sensitive: Boolean(includeSensitive),
+    })
     const payload = result?.value ?? result?.data ?? result
     const text = JSON.stringify(payload, null, 2)
     const blob = new Blob([text], { type: "application/json" })
@@ -292,10 +307,32 @@ export default function TemporalMemorySettings(
     link.download = `temporal_memory-${new Date().toISOString().slice(0, 10)}.json`
     link.click()
     URL.revokeObjectURL(url)
+    if (payload?.redacted_sensitive) {
+      setNotice(t("ui.notice.export_redacted", {
+        count: payload.redacted_sensitive,
+      }))
+    } else {
+      setNotice("")
+    }
   }
 
-  async function purgeOld() {
+  async function clearSensitive() {
     const accepted = await confirm({
+      title: t("ui.confirm.clear_sensitive_title"),
+      message: t("ui.confirm.clear_sensitive_message"),
+      tone: "danger",
+      confirmLabel: t("ui.common.delete_forever"),
+      cancelLabel: t("ui.common.cancel"),
+    })
+    if (!accepted) return
+    const result = await act("clear_sensitive_memories", { confirmed: true },
+      t("ui.action.clear_sensitive"))
+    if (result?.ok) {
+      setNotice(t("ui.notice.clear_sensitive_done", { total: result.total ?? 0 }))
+    }
+  }
+
+  async function purgeOld() {    const accepted = await confirm({
       title: t("ui.confirm.purge_title"),
       message: t("ui.confirm.purge_message"),
       tone: "danger",
@@ -460,7 +497,7 @@ export default function TemporalMemorySettings(
             <Inline align="center" justify="space-between">
               <Text>{t("ui.status.state_counts_label")}</Text>
               <Text>
-                {statuses.active ?? 0} / {statuses.dormant ?? 0} / {statuses.pending ?? 0} / {statuses.archived ?? 0}
+                {statuses.active ?? 0} / {statuses.dormant ?? 0} / {statuses.pending ?? 0} / {statuses.archived ?? 0} / {statuses.hypothesis ?? 0}
               </Text>
             </Inline>
             {(statuses.pending ?? 0) > 0 && (
@@ -797,8 +834,23 @@ export default function TemporalMemorySettings(
               {t("ui.memory.export_warning")}
             </Alert>
             <Inline align="center" justify="space-between">
+              <Text>{t("ui.memory.sensitive_hint")}</Text>
+              <Button
+                tone={includeSensitive ? "primary" : "default"}
+                onClick={() => { setIncludeSensitive(!includeSensitive) }}
+              >
+                {includeSensitive
+                  ? t("ui.memory.include_sensitive_on")
+                  : t("ui.memory.include_sensitive_off")}
+              </Button>
+            </Inline>
+            <Inline align="center" justify="space-between">
               <Button tone="default" onClick={() => act("undo_last", {})}>{t("ui.memory.undo")}</Button>
               <Button tone="default" onClick={exportJson}>{t("ui.memory.export")}</Button>
+            </Inline>
+            <Inline align="center" justify="space-between">
+              <Text>{t("ui.memory.clear_sensitive_hint")}</Text>
+              <Button tone="danger" onClick={clearSensitive}>{t("ui.memory.clear_sensitive")}</Button>
             </Inline>
             <Inline align="center" justify="space-between">
               <Text>{t("ui.memory.purge_hint")}</Text>

@@ -188,6 +188,30 @@ FACT_CUES: tuple[str, ...] = (
 )
 
 
+HYPOTHESIS_CUES: tuple[str, ...] = (
+    '假设', '假如', '如果', '要是', '倘若', '假装', '角色扮演', '来玩', '玩个',
+    '想象一下', '设定', '开个玩笑', '开玩笑', '逗你', '测试一下', '做个假设',
+    'what if', 'suppose', 'pretend', 'roleplay', 'role play', 'hypothetically',
+)
+_HYPOTHESIS_ASCII = re.compile(
+    r'\b(?:what if|suppose|pretend|role ?play|hypothetically)\b', re.IGNORECASE)
+
+
+def is_hypothesis(text: str) -> bool:
+    """识别玩笑、假设、角色扮演设定；宁可漏判，也不把真实偏好打成假设。
+
+    只在句首或前 80 字内出现明确假设词时命中。日常里「如果没记错」这类插入语
+    仍可能误判，所以写入时只降级到假设区，不删除原话，面板可人工纠正。
+    """
+    normalized = _normalize(text).strip()
+    if not normalized:
+        return False
+    head = normalized[:80].lower()
+    if _HYPOTHESIS_ASCII.search(head):
+        return True
+    return any(cue in head for cue in HYPOTHESIS_CUES)
+
+
 def classify_memory(text: str) -> str:
     """把一句原话归成事件/偏好/决定/事实；未知按事件处理。"""
     normalized = _normalize(text).lower()
