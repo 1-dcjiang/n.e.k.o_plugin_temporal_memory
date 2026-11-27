@@ -29,7 +29,7 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.6.0 已发布（GitHub Release + N.E.K.O Market）。A1752 深审修复已提交到 `main`（`4abec1e`），尚未另发版本；`plugin.toml` 仍是 0.6.0。修复新增 `tests/test_review_a1752.py`，当前全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；Hosted TSX 实机渲染仍需在插件面板里复核。
+> 当前状态：v0.6.1 已发布 GitHub Release（Latest），源码提交 `302eb90`。A1752 深审修复随 0.6.1 发布，新增 `tests/test_review_a1752.py`，全量 259 项测试（258 passed + 1 skipped）、`ruff check`、`check --release` 与 TSX 语法检查均通过；GitHub Actions Verify 与 Release 均成功。N.E.K.O Market 通知因市场端 GitHub API 502 暂时失败，线上仍显示 v0.6.0，待市场恢复后同步。
 
 ## v0.6.0 新增能力
 
@@ -46,7 +46,7 @@ v0.4 的核心原则：
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.6.0）
+├── plugin.toml            # 插件元信息与配置项（v0.6.1）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
