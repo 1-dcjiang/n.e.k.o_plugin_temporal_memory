@@ -29,7 +29,7 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：v0.6.3 已发布 GitHub Release（Latest），源码提交 `88caa95`。A1809 增量深审修复随 0.6.3 发布：新增 `tests/test_review_a1809.py` 9 项，全量 284 项（283 passed + 1 skipped），`ruff check` 通过；GitHub Actions Verify 与 Release 均成功。Release 资产 `temporal_memory.neko-plugin` 的 SHA256 为 `75b7edf221c24e739d131509a34a9ef11f3acf93eefe729142e703d02d8607da`，`payload_hash_verified=True`。Market 尚未同步。
+> 当前状态：v0.6.4 已发布 GitHub Release（Latest），源码提交 `29547cf`。A1825 增量深审修复随 0.6.4 发布：新增 `tests/test_review_a1825.py` 9 项，全量 293 项（292 passed + 1 skipped），`ruff check` 通过；GitHub Actions Verify 与 Release 均成功。Release 资产 `temporal_memory.neko-plugin` 的 SHA256 为 `89c118dc7c34565c737b06055a6a3467b7a17bda932a4db14b92c27a61f33c72`，`payload_hash_verified=True`。Market 尚未同步。
 
 ## v0.6.0 新增能力
 
@@ -46,7 +46,7 @@ v0.4 的核心原则：
 
 ```
 temporal_memory/
-├── plugin.toml            # 插件元信息与配置项（v0.6.3）
+├── plugin.toml            # 插件元信息与配置项（v0.6.4）
 ├── config.example.toml    # 运行时配置模板
 ├── __init__.py            # 插件类：写入入口、按需召回、面板动作、生命周期、定时维护
 ├── memory_store.py        # sqlite：锚点链、FTS5、语义网、工作记忆、撤销台账
