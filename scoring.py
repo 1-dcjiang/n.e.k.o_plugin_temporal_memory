@@ -198,14 +198,15 @@ FACT_CUES: tuple[str, ...] = (
 
 
 HYPOTHESIS_PREFIX_CUES: tuple[str, ...] = (
-    '假设', '假如', '倘若', '假装', '角色扮演', '来玩', '玩个',
+    '假设', '假装', '角色扮演', '来玩', '玩个',
     '我们来玩', '想象一下', '做个假设', '开个玩笑', '开玩笑', '逗你',
 )
 HYPOTHESIS_FIRST_PERSON: tuple[str, ...] = (
     '如果我是', '如果我变成', '如果我是你', '如果让你', '要是我是',
     '要是让你', '如果我是一只', '如果我变成一只', '如果你是我',
+    '假如我是', '假如让我', '假如让你', '倘若我是', '倘若让你',
 )
-# 「如果」「要是」「设定」「测试一下」单独出现不再算假设：
+# 「如果」「要是」「假如」「设定」「测试一下」单独出现不再算假设：
 # 前者常是条件规则（记住，如果我说红色就停），后者常是闹钟/日程。
 HYPOTHESIS_ROLE_PATTERN = re.compile(
     r'(?:如果|要是).{0,12}(?:你(?:当(?![时天年])|扮演|变成|来当|来扮演|'
@@ -213,15 +214,22 @@ HYPOTHESIS_ROLE_PATTERN = re.compile(
 HYPOTHESIS_SETTING_PATTERN = re.compile(
     r'设定(?:一个|个)?(?:角色|场景|世界|规则|人设|剧情|故事)')
 HYPOTHESIS_INLINE_PATTERN = re.compile(
-    r'(?:^|[，,。；;])\s*(?:假设|假如|倘若|假装|角色扮演|来玩)')
+    r'(?:^|[，,。；;！!？?\n]|那|请|咱们|我们|好的[，,！!]?)\s*'
+    r'(?:假设|假装|角色扮演|来玩|玩个)')
+HYPOTHESIS_INLINE_FIRST_PERSON = re.compile(
+    r'(?:[，,。；;！!？?\n]|那|请|咱们|我们)\s*(?:假如|倘若)'
+    r'(?:我|你)(?:是|让|变成)')
 EXPLICIT_MEMORY_PATTERN = re.compile(
     r'记住|记下|别忘|不要忘|务必记住|记得|很重要|务必|remember', re.IGNORECASE)
 _HYPOTHESIS_ASCII = re.compile(
     r'\bwhat if\b|\bhypothetically\b|\bpretend\b|\brole ?play\b|'
     r'\bsuppose (?:that )?i (?:am|was|were|become)\b',
     re.IGNORECASE)
-_HYPOTHESIS_FIRST_PERSON_TIME = ('晚', '早', '明', '今', '昨', '下', '上',
-                                 '周', '月', '年', '点', '午', '会')
+_HYPOTHESIS_FIRST_PERSON_TIME = (
+    '晚上', '早上', '明天', '今天', '昨天', '下周', '上周', '周末',
+    '下个月', '这个月', '今年', '明年', '去年', '晚会', '会上', '午后',
+    '月底', '年底', '下月',
+)
 
 
 def is_explicit_memory(text: str) -> bool:
@@ -239,12 +247,12 @@ def is_explicit_memory(text: str) -> bool:
 
 def _condition_start(text: str) -> int:
     """返回条件词位置；跳过「主要是/重要是/只需要是」里的「要是」。"""
-    match = re.search(r'(?<![主重需只不还可])要是|如果', text)
+    match = re.search(r'(?<![主重需只不还可])要是|如果|假如|倘若', text)
     return match.start() if match else -1
 
 
 def _fact_before_hypothesis(text: str) -> bool:
-    """「我对花生过敏，如果我是在外面吃饭…」前半句是事实，不是假设场景。"""
+    """「我对花生过敏，假如你做饭请注意」前半句是事实，不是假设场景。"""
     start = _condition_start(text)
     if start <= 0:
         return False
@@ -259,8 +267,9 @@ def _starts_hypothesis_role(text: str) -> bool:
     for cue in HYPOTHESIS_FIRST_PERSON:
         if not text.startswith(cue):
             continue
-        tail = text[len(cue):len(cue) + 1]
-        if cue in {'如果我是', '要是我是'} and tail in _HYPOTHESIS_FIRST_PERSON_TIME:
+        tail = text[len(cue):len(cue) + 3]
+        if cue in {'如果我是', '要是我是', '假如我是', '倘若我是'} and any(
+                tail.startswith(token) for token in _HYPOTHESIS_FIRST_PERSON_TIME):
             continue
         return True
     return False
@@ -270,7 +279,7 @@ def is_hypothesis(text: str) -> bool:
     """识别玩笑、假设、角色扮演设定；宁可漏判，也不把真实偏好打成假设。
 
     只在句首出现假设词，或出现「假设类动词 + 第一人称/角色」时命中；
-    「如果」「要是」「设定」「测试一下」单独出现不再命中，避免把
+    「如果」「要是」「假如」「设定」「测试一下」单独出现不再命中，避免把
     「记住，如果我说红色就停」「我对花生过敏，如果做饭注意」「设定闹钟」
     这类真实规则/事实丢进假设区。
     """
@@ -279,7 +288,7 @@ def is_hypothesis(text: str) -> bool:
         return False
     if is_explicit_memory(normalized):
         return False
-    head = normalized[:80].lower()
+    head = normalized[:200].lower()
     # 句首假设词优先于「我是…」的事实豁免，避免
     # 「假设我是店长，如果顾客投诉你怎么办」被当成事实。
     if any(head.startswith(cue) for cue in HYPOTHESIS_PREFIX_CUES):
@@ -290,10 +299,14 @@ def is_hypothesis(text: str) -> bool:
         return True
     if HYPOTHESIS_SETTING_PATTERN.search(head):
         return True
-    if HYPOTHESIS_INLINE_PATTERN.search(head):
-        return True
+    # 事实豁免要先于 INLINE：否则「我对花生过敏，假如…」会被逗号后的
+    # 假如误判成假设。句首假设词/第一人称已经在上面优先返回。
     if _fact_before_hypothesis(normalized):
         return False
+    if HYPOTHESIS_INLINE_PATTERN.search(head):
+        return True
+    if HYPOTHESIS_INLINE_FIRST_PERSON.search(head):
+        return True
     return bool(_HYPOTHESIS_ASCII.search(head))
 
 

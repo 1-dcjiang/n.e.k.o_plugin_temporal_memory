@@ -1076,7 +1076,9 @@ class TemporalMemoryPlugin(NekoPluginBase):
     async def preview_clear_sensitive_memories(self, **_):
         result: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
                                   'working': 0, 'total': 0, 'databases': 0,
-                                  'failed': 0, 'samples': []}
+                                  'failed': 0, 'backups': 0,
+                                  'backups_unreadable': 0, 'backups_failed': 0,
+                                  'samples': []}
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         for path in self._db_file_paths():
@@ -1102,6 +1104,12 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 if len(result['samples']) >= 10:
                     break
                 result['samples'].append(sample)
+        backup_stats = await asyncio.to_thread(
+            self._scan_sensitive_migration_backups)
+        result['backups'] = int(backup_stats.get('backups') or 0)
+        result['backups_unreadable'] = int(
+            backup_stats.get('backups_unreadable') or 0)
+        result['backups_failed'] = int(backup_stats.get('failed') or 0)
         result['ok'] = result['failed'] == 0
         return Ok(result)
 
@@ -1220,6 +1228,33 @@ class TemporalMemoryPlugin(NekoPluginBase):
                 continue
             removed += 1
         return removed
+
+    def _scan_sensitive_migration_backups(self) -> dict[str, int]:
+        """只读统计会被清除连带的迁移备份，不删除文件。"""
+        stats = {'backups': 0, 'backups_unreadable': 0, 'failed': 0}
+        parent = os.path.dirname(self._db_path())
+        try:
+            names = os.listdir(parent)
+        except OSError as exc:
+            self.logger.warning('扫描迁移备份目录失败: %s', exc)
+            stats['failed'] = 1
+            return stats
+        for name in names:
+            if '.db.migrated' not in name:
+                continue
+            path = os.path.join(parent, name)
+            try:
+                sensitive = _backup_has_sensitive(path)
+            except Exception as exc:
+                self.logger.warning('预览迁移备份失败(%s): %s', name, exc)
+                stats['failed'] += 1
+                continue
+            if sensitive is None:
+                stats['backups'] += 1
+                stats['backups_unreadable'] += 1
+            elif sensitive:
+                stats['backups'] += 1
+        return stats
 
     def _purge_sensitive_migration_backups(self) -> dict[str, int]:
         """清除敏感条目后，连带删除含敏感明文的迁移备份；无敏感的备份保留。

@@ -47,25 +47,37 @@ SENSITIVE_TAGS = frozenset({
 
 # observe 的标签白名单只有领域词，自动标签永远不会有「生日」；敏感判定必须看正文。
 SENSITIVE_TEXT_TERMS = (
-    '生日', '诞生日', '纪念日', '周年', '结婚', '婚礼', '求婚', '告白',
+    '生日', '诞生日', '纪念日', '结婚', '婚礼', '求婚',
     '初恋', '初吻', '分手', '第一次一起', '第一次约', '第一次告白',
-    '第一次接吻', 'birthday', 'anniversary',
+    '第一次接吻',
 )
 
 # milestone/proposal/第一次见/confession 在开发与商务语境里很常见，不能裸词命中；
-# 只有和情感语境同现时才按敏感处理。
+# 只有和情感语境同现时才按敏感处理。英文词加词边界，并排除
+# birthday attack / Windows Anniversary Update 这类技术固定搭配。
 SENSITIVE_TEXT_PATTERNS = (
     re.compile(
-        r'(?:感情|恋爱|关系|婚姻|我们|一起|人生).{0,12}里程碑|'
-        r'里程碑.{0,12}(?:感情|恋爱|关系|婚姻|我们|一起|人生)'),
+        r'(?:感情|恋爱|婚姻|爱情|人生).{0,12}里程碑|'
+        r'里程碑.{0,12}(?:感情|恋爱|婚姻|爱情|人生)'),
     re.compile(
-        r'(?:结婚|婚礼|求婚|marriage|wedding|propose).{0,20}(?:proposal|milestone)|'
+        r'(?:结婚|婚礼|求婚|marriage|wedding).{0,20}(?:proposal|milestone)|'
         r'(?:proposal|milestone).{0,20}(?:结婚|婚礼|求婚|marriage|wedding)'),
     re.compile(
-        r'(?:第一次见|第一次见面|初见).{0,15}(?:心动|喜欢|爱|紧张|害羞|难忘|印象)'),
+        r'(?:第一次见|初见)(?:他|她|你|对方|这个人|那个人|面).{0,12}'
+        r'(?:心动|喜欢|爱|害羞|难忘)'),
     re.compile(
         r'(?:confession).{0,20}(?:love|feelings|romantic)|'
         r'(?:love|feelings|romantic).{0,20}(?:confession)'),
+    re.compile(
+        r'(?:结婚|婚礼|求婚|恋爱|感情|相爱).{0,10}周年|'
+        r'周年.{0,10}(?:结婚|婚礼|求婚|恋爱|感情|相爱)'),
+    # 中文没有词边界：「广告白名单/公告白名单」会跨词拼出「告白」。
+    re.compile(r'(?<![广公报])告白'),
+    re.compile(
+        r'(?<![a-z])birthday(?!\s+(?:attack|paradox|problem|bound|collision))'
+        r'(?![a-z])'),
+    re.compile(
+        r'(?<![a-z])anniversary(?!\s+(?:update|edition|release))(?![a-z])'),
 )
 
 
@@ -77,21 +89,28 @@ def is_sensitive_text(text: Any) -> bool:
     return any(pattern.search(normalized) for pattern in SENSITIVE_TEXT_PATTERNS)
 
 
+def _sensitive_reasons(item: dict[str, Any], table: str) -> tuple[str, ...]:
+    """返回敏感原因，供预览区分正文/标签/仅情绪命中。"""
+    reasons: list[str] = []
+    tags = str(item.get('tags') or '').lower().replace('，', ',')
+    tag_set = {tag.strip() for tag in tags.split(',') if tag.strip()}
+    if tag_set & SENSITIVE_TAGS:
+        reasons.append('tag')
+    for key in ('quote', 'summary', 'content'):
+        if is_sensitive_text(item.get(key)):
+            reasons.append('text')
+            break
+    if table == 'anchors' and float(item.get('emotion') or 0.0) >= 0.75:
+        reasons.append('emotion')
+    return tuple(reasons)
+
+
 def _is_sensitive(item: dict[str, Any], table: str) -> bool:
     """里程碑/情感类默认不导出；标签、正文或高情绪锚点都算。
 
     这是保守规则，不判断内容语义；用户可在导出面板显式勾选包含。
     """
-    tags = str(item.get('tags') or '').lower().replace('，', ',')
-    tag_set = {tag.strip() for tag in tags.split(',') if tag.strip()}
-    if tag_set & SENSITIVE_TAGS:
-        return True
-    for key in ('quote', 'summary', 'content'):
-        if is_sensitive_text(item.get(key)):
-            return True
-    if table == 'anchors' and float(item.get('emotion') or 0.0) >= 0.75:
-        return True
-    return False
+    return bool(_sensitive_reasons(item, table))
 
 
 def _redact_working_turns(turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -592,7 +611,8 @@ class MemoryEngine:
     def preview_sensitive(self) -> dict[str, Any]:
         """清除前 dry-run：返回命中数量与前几条预览，不删除任何数据。"""
         result: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
-                                  'working': 0, 'total': 0, 'samples': []}
+                                  'working': 0, 'total': 0, 'backups': 0,
+                                  'backups_unreadable': 0, 'samples': []}
         for table in ('anchors', 'semantics'):
             for item in self.store.all_memories(table, limit=None):
                 if not _is_sensitive(item, table):
@@ -606,6 +626,8 @@ class MemoryEngine:
                         'table': table,
                         'id': str(item.get('id') or ''),
                         'text': str(text)[:80],
+                        'reason': ','.join(_sensitive_reasons(item, table)),
+                        'pinned': bool(item.get('pinned')),
                     })
         all_turns = self.store.all_working_turns()
         kept_turns, _ = _redact_working_turns(all_turns)
