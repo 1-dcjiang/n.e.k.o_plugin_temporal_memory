@@ -32,6 +32,7 @@ from plugin.sdk.plugin import (
 from .engine import (
     DEFAULT_SETTINGS,
     MAX_EXPORT_ROWS_PER_TABLE,
+    SENSITIVE_TAGS,
     MemoryEngine,
     is_sensitive_text,
 )
@@ -63,19 +64,40 @@ def _backup_has_sensitive(path: str) -> bool | None:
         conn.execute('PRAGMA busy_timeout=2000')
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        columns = (('anchors', ('quote', 'summary')),
-                   ('semantics', ('content',)),
-                   ('wm', ('content',)))
-        for table, names in columns:
+        text_columns = ('quote', 'summary', 'content', 'tags')
+        for table in ('anchors', 'semantics', 'wm'):
             if table not in tables:
                 continue
-            for column in names:
+            # 旧 schema 可能没有 quote 列：按实际列扫描，缺列跳过而不是整份判为不可读。
+            try:
+                actual = {row[1] for row in conn.execute(
+                    f'PRAGMA table_info({table})').fetchall()}
+            except sqlite3.Error:
+                return None
+            for column in text_columns:
+                if column not in actual:
+                    continue
                 try:
                     rows = conn.execute(f'SELECT {column} FROM {table}')
                 except sqlite3.Error:
                     return None
-                if any(is_sensitive_text(row[0]) for row in rows):
-                    return True
+                for row in rows:
+                    value = row[0]
+                    if column == 'tags':
+                        tag_set = {tag.strip().lower()
+                                   for tag in str(value or '').replace('，', ',')
+                                   .split(',') if tag.strip()}
+                        if tag_set & SENSITIVE_TAGS:
+                            return True
+                    elif is_sensitive_text(value):
+                        return True
+            if table == 'anchors' and 'emotion' in actual:
+                try:
+                    if any(float(row[0] or 0.0) >= 0.75 for row in conn.execute(
+                            'SELECT emotion FROM anchors')):
+                        return True
+                except (sqlite3.Error, TypeError, ValueError):
+                    return None
     except sqlite3.Error:
         return None
     finally:
@@ -970,8 +992,13 @@ class TemporalMemoryPlugin(NekoPluginBase):
         loaded = {os.path.abspath(engine.store.db_path): engine
                   for engine in self._engines.values()}
         failures: list[str] = []
+        try:
+            candidates = self._delete_candidates(character, loaded)
+        except Exception as exc:
+            self.logger.warning('删除工作记忆定位失败: %s', exc)
+            return Err(SdkError('删除失败，请稍后重试'))
         # 空串必须是「默认库」：wm.id 是每库自增，跨库遍历会删到别的库同 id 的行
-        for path in self._delete_candidates(character, loaded):
+        for path in candidates:
             engine = loaded.get(path)
             opened = None
             try:
@@ -1035,6 +1062,48 @@ class TemporalMemoryPlugin(NekoPluginBase):
             return Err(SdkError(self._engine_error(character)))
         self._unloaded_cache = None
         return Ok({'ok': True, 'path': target, 'character': character})
+
+    @plugin_entry(
+        id='preview_clear_sensitive_memories',
+        name='预览待清除条目',
+        description='只统计命中数量并返回前几条预览，不删除任何数据。',
+        input_schema={
+            'type': 'object',
+            'properties': {},
+        },
+        metadata={'agent_hidden': True},
+    )
+    async def preview_clear_sensitive_memories(self, **_):
+        result: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
+                                  'working': 0, 'total': 0, 'databases': 0,
+                                  'failed': 0, 'samples': []}
+        loaded = {os.path.abspath(engine.store.db_path): engine
+                  for engine in self._engines.values()}
+        for path in self._db_file_paths():
+            engine = loaded.get(path)
+            opened = None
+            try:
+                if engine is None:
+                    opened = await asyncio.to_thread(
+                        MemoryEngine, path, dict(self._settings))
+                    engine = opened
+                one = await asyncio.to_thread(engine.preview_sensitive)
+            except Exception as exc:
+                result['failed'] += 1
+                self.logger.warning('预览敏感条目失败: %s', exc)
+                continue
+            finally:
+                if opened is not None:
+                    await asyncio.to_thread(opened.store.close)
+            result['databases'] += 1
+            for key in ('anchors', 'semantics', 'working', 'total'):
+                result[key] += int(one.get(key) or 0)
+            for sample in one.get('samples') or []:
+                if len(result['samples']) >= 10:
+                    break
+                result['samples'].append(sample)
+        result['ok'] = result['failed'] == 0
+        return Ok(result)
 
     @ui.action(label='清除里程碑/情感条目', tone='danger', refresh_context=True)
     @plugin_entry(

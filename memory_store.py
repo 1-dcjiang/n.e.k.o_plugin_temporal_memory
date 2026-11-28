@@ -596,7 +596,8 @@ class MemoryStore:
                 'SELECT id, ts, role, content FROM wm ORDER BY id ASC').fetchall()
         return [dict(r) for r in rows]
 
-    def delete_working_turn(self, turn_id: int) -> bool:
+    def delete_working_turn(self, turn_id: int, *,
+                            purge_residue: bool = True) -> bool:
         """永久删除工作记忆里的一条原话，不受窗口滚动限制。不可撤销。"""
         try:
             turn_id = int(turn_id)
@@ -608,7 +609,8 @@ class MemoryStore:
                 return False
             conn.execute('DELETE FROM wm WHERE id=?', (turn_id,))
             self._commit(conn)
-        self._purge_delete_residue()
+        if purge_residue:
+            self._purge_delete_residue()
         return True
 
     def workmem_hits(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
