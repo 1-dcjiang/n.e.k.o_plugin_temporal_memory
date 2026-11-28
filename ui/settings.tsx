@@ -318,21 +318,43 @@ export default function TemporalMemorySettings(
   }
 
   async function clearSensitive() {
+    const REASON_KEYS: Record<string, string> = {
+      text: "ui.confirm.clear_sensitive_reason_text",
+      tag: "ui.confirm.clear_sensitive_reason_tag",
+      emotion: "ui.confirm.clear_sensitive_reason_emotion",
+    }
     const preview = await act("preview_clear_sensitive_memories", {},
       t("ui.action.preview_sensitive"))
     if (!preview || preview.ok === false) return
     const total = Number(preview.total ?? 0)
-    if (total === 0) {
+    const backups = Number(preview.backups ?? 0)
+    const unreadable = Number(preview.backups_unreadable ?? 0)
+    const backupsFailed = Number(preview.backups_failed ?? 0)
+    if (total === 0 && backups === 0 && backupsFailed === 0) {
       setNotice(t("ui.notice.clear_sensitive_empty"))
       return
     }
     const samples = (preview.samples ?? []) as Array<{
       table?: string
       text?: string
+      reason?: string
+      pinned?: boolean
     }>
     const sampleText = samples.length > 0
-      ? "\n\n" + samples.map((item) =>
-        `- [${item.table ?? "anchors"}] ${item.text ?? ""}`).join("\n")
+      ? "\n\n" + samples.map((item) => {
+        const reason = (item.reason ?? "")
+          .split(",")
+          .filter(Boolean)
+          .map((value) => REASON_KEYS[value])
+          .filter((key): key is string => Boolean(key))
+          .map((key) => t(key))
+          .join(",")
+        const flags = [
+          reason ? `[${reason}]` : "",
+          item.pinned ? `[${t("ui.confirm.clear_sensitive_pinned")}]` : "",
+        ].join("")
+        return `- ${flags}[${item.table ?? "anchors"}] ${item.text ?? ""}`
+      }).join("\n")
       : ""
     const accepted = await confirm({
       title: t("ui.confirm.clear_sensitive_title"),
@@ -342,6 +364,9 @@ export default function TemporalMemorySettings(
           anchors: preview.anchors ?? 0,
           semantics: preview.semantics ?? 0,
           working: preview.working ?? 0,
+          backups,
+          unreadable,
+          backupsFailed,
         }) + sampleText,
       tone: "danger",
       confirmLabel: t("ui.common.delete_forever"),
