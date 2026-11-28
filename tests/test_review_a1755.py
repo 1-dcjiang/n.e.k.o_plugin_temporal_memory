@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import temporal_memory.engine as engine_module
+import temporal_memory.memory_store as memory_store
 from temporal_memory import scoring
 from temporal_memory.engine import MemoryEngine, _is_sensitive
 from temporal_memory.retrieval import _fit_budget, _rank_anchors
@@ -88,21 +89,25 @@ def test_working_memory_filters_assistant_reply_after_sensitive_user_turn(tmp_pa
 
 
 def test_export_and_clear_do_not_stop_at_capacity_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr(engine_module, 'MAX_TOTAL_MEMORIES', 2, raising=False)
     engine = _engine(tmp_path)
     for index in range(4):
         engine.store.add_anchor(
             summary=f'普通记录 {index}', quote=f'普通记录 {index}',
             ts=1000 + index, score=0.1, status='active', kind='event')
-    exported = engine.export(max_rows=10)
-    assert len(exported['anchors']) == 4
-    assert exported['truncated']['anchors'] is False
 
     engine2 = _engine(tmp_path / 'second')
     for index in range(4):
         engine2.store.add_anchor(
             summary=f'生日记录 {index}', quote=f'生日记录 {index}',
             ts=2000 + index, score=0.1, status='active', kind='event')
+
+    # 数据量必须真正越过常量，否则旧实现 limit=MAX_TOTAL_MEMORIES+1 也能通过。
+    # 常量在 memory_store，不在 engine；补丁目标必须正确。
+    monkeypatch.setattr(memory_store, 'MAX_TOTAL_MEMORIES', 2)
+    exported = engine.export(max_rows=10)
+    assert len(exported['anchors']) == 4
+    assert exported['truncated']['anchors'] is False
+
     cleared = engine2.clear_sensitive()
     assert cleared['anchors'] == 4
 

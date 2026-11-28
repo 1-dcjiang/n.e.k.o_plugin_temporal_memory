@@ -318,9 +318,31 @@ export default function TemporalMemorySettings(
   }
 
   async function clearSensitive() {
+    const preview = await act("preview_clear_sensitive_memories", {},
+      t("ui.action.preview_sensitive"))
+    if (!preview || preview.ok === false) return
+    const total = Number(preview.total ?? 0)
+    if (total === 0) {
+      setNotice(t("ui.notice.clear_sensitive_empty"))
+      return
+    }
+    const samples = (preview.samples ?? []) as Array<{
+      table?: string
+      text?: string
+    }>
+    const sampleText = samples.length > 0
+      ? "\n\n" + samples.map((item) =>
+        `- [${item.table ?? "anchors"}] ${item.text ?? ""}`).join("\n")
+      : ""
     const accepted = await confirm({
       title: t("ui.confirm.clear_sensitive_title"),
-      message: t("ui.confirm.clear_sensitive_message"),
+      message: t("ui.confirm.clear_sensitive_message")
+        + "\n\n" + t("ui.confirm.clear_sensitive_preview", {
+          total,
+          anchors: preview.anchors ?? 0,
+          semantics: preview.semantics ?? 0,
+          working: preview.working ?? 0,
+        }) + sampleText,
       tone: "danger",
       confirmLabel: t("ui.common.delete_forever"),
       cancelLabel: t("ui.common.cancel"),

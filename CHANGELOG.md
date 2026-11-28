@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.3（A1809 增量深审修复）
+
+- M1 假设判定：句首假设词优先于「我是/我的」事实豁免；`假设我是店长，如果…`、`我们来玩角色扮演，我是医生，如果…` 不再被归为事实。条件词前必须是完整陈述子句（以逗号/句号结尾）才保留事实；`主要是/重要是` 里的「要是」不再当条件词。新增 `HYPOTHESIS_INLINE_PATTERN` 识别逗号后的「假设/假如/来玩」。
+- M2 测试：`test_export_and_clear_do_not_stop_at_capacity_probe` 改为 patch `memory_store.MAX_TOTAL_MEMORIES`，并在插入 4 行后再收紧常量，旧实现 `limit=MAX_TOTAL_MEMORIES+1` 会真正失败。
+- M3 敏感边界：移除裸词 `里程碑/milestone/proposal/第一次见/confession`，只保留情感语境组合；`项目里程碑`、`grant proposal`、`第一次见这个报错` 不再命中。新增 `preview_clear_sensitive_memories` dry-run 入口与面板命中计数/前 5 条预览，确认框先看再删。
+- L1 批量删除：`clear_sensitive` / `consolidate` 逐条 `delete_permanent(purge_residue=False)`，循环后统一 `purge_delete_residue()`，避免每删一行都 checkpoint/FTS optimize。
+- L2/L3/L4/L7 假设与打分：角色正则排除「你当时/你演示」；`如果我是晚上…` 不再无条件判假设；否定「不记得」不再当显式记忆；`raw_score` 独立累加，去掉 `total - 0.35` 的浮点残差。
+- L5 备份扫描：按 `PRAGMA table_info` 扫实际存在的 `quote/summary/content/tags/emotion` 列；旧 schema 缺 `quote` 不再整份判为不可读，`semantics.quote` 与敏感标签纳入扫描。
+- L6 固定假设：`pin` 前先走 `confirm` 重分类，不再留下 pinned + kind=hypothesis 的条目。
+- L8/L9：`delete_working_turn` 的 `_delete_candidates` 加异常兜底；预算注释改为「用尽即终止」。
+- 测试：新增 `tests/test_review_a1809.py` 9 项；全量 284 项（283 passed + 1 skipped），`ruff check` 通过；本地 SQLite 3.53.1。
+- 版本 0.6.3（待发布）。
+
 ## 0.6.2（A1755 增量复审修复）
 
 - A1 假设判定：`如果我是/如果让你` 只在句首命中；移除过宽的「你是」角色正则；`I suppose` 不再命中；显式记忆增加「记得/很重要/务必」；句首条件前已有事实/偏好（如「我对花生过敏，如果…」）不判假设，保留语义。

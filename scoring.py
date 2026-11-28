@@ -116,14 +116,16 @@ def score_turn(user_text: str, assistant_text: str = '',
     user = _normalize(user_text)
     signals: list[str] = []
     total = 0.0
+    raw_total = 0.0
     for name, pattern, weight in SIGNAL_PATTERNS:
         if re.search(pattern, user, re.I):
             signals.append(name)
             total += weight
+            raw_total += weight
 
     if is_hypothesis(user):
         # 假设句也要过阈值才落库；否则「假设明天可能下雨」这种闲聊会绕开稀疏策略。
-        # raw_score 不包含这 0.35，避免固定加分让阈值形同虚设。
+        # raw_score 单独累加，不做 total - 0.35 的浮点减法。
         signals.append('hypothesis')
         total += 0.35
 
@@ -131,8 +133,9 @@ def score_turn(user_text: str, assistant_text: str = '',
     mundane = is_mundane(user) and not signals
     if mundane:
         total = 0.0
+        raw_total = 0.0
 
-    raw = min(1.0, total - (0.35 if 'hypothesis' in signals else 0.0))
+    raw = min(1.0, raw_total)
     emotion = emotion_weight(user, signals)
     if emotion >= 0.9:
         total += 0.15  # 强情绪单独加分，避免被长句摊薄
@@ -196,7 +199,7 @@ FACT_CUES: tuple[str, ...] = (
 
 HYPOTHESIS_PREFIX_CUES: tuple[str, ...] = (
     '假设', '假如', '倘若', '假装', '角色扮演', '来玩', '玩个',
-    '想象一下', '做个假设', '开个玩笑', '开玩笑', '逗你',
+    '我们来玩', '想象一下', '做个假设', '开个玩笑', '开玩笑', '逗你',
 )
 HYPOTHESIS_FIRST_PERSON: tuple[str, ...] = (
     '如果我是', '如果我变成', '如果我是你', '如果让你', '要是我是',
@@ -205,29 +208,62 @@ HYPOTHESIS_FIRST_PERSON: tuple[str, ...] = (
 # 「如果」「要是」「设定」「测试一下」单独出现不再算假设：
 # 前者常是条件规则（记住，如果我说红色就停），后者常是闹钟/日程。
 HYPOTHESIS_ROLE_PATTERN = re.compile(
-    r'(?:如果|要是).{0,12}(?:你当|你扮演|你变成|你来当|你来扮演|你饰演|你演)')
+    r'(?:如果|要是).{0,12}(?:你(?:当(?![时天年])|扮演|变成|来当|来扮演|'
+    r'饰演|演(?![示])))')
 HYPOTHESIS_SETTING_PATTERN = re.compile(
     r'设定(?:一个|个)?(?:角色|场景|世界|规则|人设|剧情|故事)')
+HYPOTHESIS_INLINE_PATTERN = re.compile(
+    r'(?:^|[，,。；;])\s*(?:假设|假如|倘若|假装|角色扮演|来玩)')
 EXPLICIT_MEMORY_PATTERN = re.compile(
     r'记住|记下|别忘|不要忘|务必记住|记得|很重要|务必|remember', re.IGNORECASE)
 _HYPOTHESIS_ASCII = re.compile(
     r'\bwhat if\b|\bhypothetically\b|\bpretend\b|\brole ?play\b|'
     r'\bsuppose (?:that )?i (?:am|was|were|become)\b',
     re.IGNORECASE)
+_HYPOTHESIS_FIRST_PERSON_TIME = ('晚', '早', '明', '今', '昨', '下', '上',
+                                 '周', '月', '年', '点', '午', '会')
 
 
 def is_explicit_memory(text: str) -> bool:
     """显式「记住/别忘」优先：这类句子即使带「如果」也必须是事实，不是假设。"""
-    return bool(EXPLICIT_MEMORY_PATTERN.search(_normalize(text)[:80]))
+    normalized = _normalize(text)[:80]
+    for match in EXPLICIT_MEMORY_PATTERN.finditer(normalized):
+        token = match.group(0)
+        before = normalized[max(0, match.start() - 2):match.start()]
+        # 「我不记得了，假设我是…」里的「记得」不是显式记忆指令。
+        if token == '记得' and re.search(r'[不没未]$', before):
+            continue
+        return True
+    return False
+
+
+def _condition_start(text: str) -> int:
+    """返回条件词位置；跳过「主要是/重要是/只需要是」里的「要是」。"""
+    match = re.search(r'(?<![主重需只不还可])要是|如果', text)
+    return match.start() if match else -1
 
 
 def _fact_before_hypothesis(text: str) -> bool:
     """「我对花生过敏，如果我是在外面吃饭…」前半句是事实，不是假设场景。"""
-    match = re.search(r'如果|要是', text)
-    if not match or match.start() == 0:
+    start = _condition_start(text)
+    if start <= 0:
         return False
-    prefix = text[:match.start()]
+    prefix = text[:start].strip()
+    if not re.search(r'[，,。；;！!]$', prefix):
+        return False
     return any(cue in prefix for cue in PREFERENCE_CUES + FACT_CUES + SEMANTIC_CUES)
+
+
+def _starts_hypothesis_role(text: str) -> bool:
+    """「如果我是…」只在后面不是时间状语时算假设。"""
+    for cue in HYPOTHESIS_FIRST_PERSON:
+        if not text.startswith(cue):
+            continue
+        tail = text[len(cue):len(cue) + 1]
+        if cue in {'如果我是', '要是我是'} and tail in _HYPOTHESIS_FIRST_PERSON_TIME:
+            continue
+        return True
+    return False
 
 
 def is_hypothesis(text: str) -> bool:
@@ -243,17 +279,21 @@ def is_hypothesis(text: str) -> bool:
         return False
     if is_explicit_memory(normalized):
         return False
-    if _fact_before_hypothesis(normalized):
-        return False
     head = normalized[:80].lower()
+    # 句首假设词优先于「我是…」的事实豁免，避免
+    # 「假设我是店长，如果顾客投诉你怎么办」被当成事实。
     if any(head.startswith(cue) for cue in HYPOTHESIS_PREFIX_CUES):
         return True
-    if any(head.startswith(cue) for cue in HYPOTHESIS_FIRST_PERSON):
+    if _starts_hypothesis_role(head):
         return True
     if HYPOTHESIS_ROLE_PATTERN.search(head):
         return True
     if HYPOTHESIS_SETTING_PATTERN.search(head):
         return True
+    if HYPOTHESIS_INLINE_PATTERN.search(head):
+        return True
+    if _fact_before_hypothesis(normalized):
+        return False
     return bool(_HYPOTHESIS_ASCII.search(head))
 
 

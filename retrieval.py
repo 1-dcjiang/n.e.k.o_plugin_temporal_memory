@@ -258,7 +258,7 @@ def _fit_sections(sections: list[tuple[list[str], float]], budget: int,
 
 
 def _fit_budget(lines: list[str], budget: int, token_budget: int | None = None) -> str:
-    """按整行裁剪：单行先截断，超预算的行跳过而不是终止，标题随内容保留。"""
+    """按整行裁剪：单行先截断，总预算用尽即终止（不再尝试后续行），标题随内容保留。"""
     if not lines:
         return ''
     kept: list[str] = []

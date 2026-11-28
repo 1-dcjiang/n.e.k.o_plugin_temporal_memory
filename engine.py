@@ -7,6 +7,7 @@ v0.4 不再自动往对话里推记忆。写入只落本插件库；只有模型
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -40,23 +41,40 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 CONFIRM_SIMILARITY = 0.92
 
 SENSITIVE_TAGS = frozenset({
-    '里程碑', '纪念', '纪念日', '生日', '周年', '情感', '告白', '求婚',
-    'milestone', 'anniversary', 'birthday', 'emotional', 'confession', 'proposal',
+    '纪念', '纪念日', '生日', '周年', '情感', '告白', '求婚',
+    'anniversary', 'birthday', 'emotional',
 })
 
 # observe 的标签白名单只有领域词，自动标签永远不会有「生日」；敏感判定必须看正文。
 SENSITIVE_TEXT_TERMS = (
     '生日', '诞生日', '纪念日', '周年', '结婚', '婚礼', '求婚', '告白',
-    '初恋', '初吻', '分手', '第一次一起', '第一次见', '第一次约',
-    '第一次告白', '第一次接吻', '里程碑',
-    'birthday', 'anniversary', 'milestone', 'proposal', 'confession',
+    '初恋', '初吻', '分手', '第一次一起', '第一次约', '第一次告白',
+    '第一次接吻', 'birthday', 'anniversary',
+)
+
+# milestone/proposal/第一次见/confession 在开发与商务语境里很常见，不能裸词命中；
+# 只有和情感语境同现时才按敏感处理。
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(
+        r'(?:感情|恋爱|关系|婚姻|我们|一起|人生).{0,12}里程碑|'
+        r'里程碑.{0,12}(?:感情|恋爱|关系|婚姻|我们|一起|人生)'),
+    re.compile(
+        r'(?:结婚|婚礼|求婚|marriage|wedding|propose).{0,20}(?:proposal|milestone)|'
+        r'(?:proposal|milestone).{0,20}(?:结婚|婚礼|求婚|marriage|wedding)'),
+    re.compile(
+        r'(?:第一次见|第一次见面|初见).{0,15}(?:心动|喜欢|爱|紧张|害羞|难忘|印象)'),
+    re.compile(
+        r'(?:confession).{0,20}(?:love|feelings|romantic)|'
+        r'(?:love|feelings|romantic).{0,20}(?:confession)'),
 )
 
 
 def is_sensitive_text(text: Any) -> bool:
     """按正文判断里程碑/情感内容：不依赖模型有没有主动打标签。"""
     normalized = str(text or '').lower().replace('，', ',')
-    return any(term in normalized for term in SENSITIVE_TEXT_TERMS)
+    if any(term in normalized for term in SENSITIVE_TEXT_TERMS):
+        return True
+    return any(pattern.search(normalized) for pattern in SENSITIVE_TEXT_PATTERNS)
 
 
 def _is_sensitive(item: dict[str, Any], table: str) -> bool:
@@ -495,6 +513,14 @@ class MemoryEngine:
         return self.store.confirm_memory(table, memory_id, kind=kind)
 
     def pin(self, table: str, memory_id: str, pinned: bool) -> dict[str, Any]:
+        if pinned and table == 'anchors':
+            item = self.store.get_memory(table, memory_id)
+            if item and item.get('status') == 'hypothesis':
+                # 固定假设行不能只翻 status：先按 confirm 的逻辑重分类，
+                # 否则会留下 pinned + 可召回 + kind=hypothesis 的误导条目。
+                confirmed = self.confirm(table, memory_id)
+                if not confirmed.get('ok'):
+                    return confirmed
         return self.store.set_pinned(table, memory_id, pinned)
 
     def correct(self, table: str, memory_id: str, **fields: Any) -> dict[str, Any]:
@@ -512,8 +538,10 @@ class MemoryEngine:
         return self.store.delete_permanent(
             table, memory_id, purge_residue=purge_residue)
 
-    def delete_working_turn(self, turn_id: int) -> dict[str, Any]:
-        ok = self.store.delete_working_turn(turn_id)
+    def delete_working_turn(self, turn_id: int, *,
+                            purge_residue: bool = True) -> dict[str, Any]:
+        ok = self.store.delete_working_turn(
+            turn_id, purge_residue=purge_residue)
         return ({'ok': True, 'id': int(turn_id)} if ok
                 else {'ok': False, 'reason': 'not_found'})
 
@@ -561,27 +589,61 @@ class MemoryEngine:
             'include_sensitive': include_sensitive,
         }
 
-    def clear_sensitive(self) -> dict[str, Any]:
-        """永久清除里程碑/情感类条目；只在本插件私有库内执行，不可撤销。"""
-        total = {'ok': True, 'anchors': 0, 'semantics': 0,
-                 'working': 0, 'total': 0}
+    def preview_sensitive(self) -> dict[str, Any]:
+        """清除前 dry-run：返回命中数量与前几条预览，不删除任何数据。"""
+        result: dict[str, Any] = {'ok': True, 'anchors': 0, 'semantics': 0,
+                                  'working': 0, 'total': 0, 'samples': []}
         for table in ('anchors', 'semantics'):
             for item in self.store.all_memories(table, limit=None):
                 if not _is_sensitive(item, table):
                     continue
-                result = self.store.delete_permanent(table, item['id'])
+                result[table] += 1
+                result['total'] += 1
+                if len(result['samples']) < 5:
+                    text = (item.get('quote') or item.get('summary')
+                            or item.get('content') or '')
+                    result['samples'].append({
+                        'table': table,
+                        'id': str(item.get('id') or ''),
+                        'text': str(text)[:80],
+                    })
+        all_turns = self.store.all_working_turns()
+        kept_turns, _ = _redact_working_turns(all_turns)
+        result['working'] = len(all_turns) - len(kept_turns)
+        result['total'] += result['working']
+        return result
+
+    def clear_sensitive(self) -> dict[str, Any]:
+        """永久清除里程碑/情感类条目；只在本插件私有库内执行，不可撤销。"""
+        total = {'ok': True, 'anchors': 0, 'semantics': 0,
+                 'working': 0, 'total': 0}
+        deleted = 0
+        deleted_working = 0
+        for table in ('anchors', 'semantics'):
+            for item in self.store.all_memories(table, limit=None):
+                if not _is_sensitive(item, table):
+                    continue
+                # 逐条删除只做页面清零；FTS optimize/WAL checkpoint 留到循环后统一收尾。
+                result = self.store.delete_permanent(
+                    table, item['id'], purge_residue=False)
                 if result.get('ok'):
                     total[table] += 1
                     total['total'] += 1
+                    deleted += 1
         all_turns = self.store.all_working_turns()
         kept_turns, _ = _redact_working_turns(all_turns)
         kept_ids = {int(turn['id']) for turn in kept_turns}
         for turn in all_turns:
             if int(turn['id']) in kept_ids:
                 continue
-            if self.store.delete_working_turn(int(turn['id'])):
+            if self.store.delete_working_turn(
+                    int(turn['id']), purge_residue=False):
                 total['working'] += 1
                 total['total'] += 1
+                deleted_working += 1
+        if deleted or deleted_working:
+            # 一次性收尾：避免每删一行都开连接做 optimize/checkpoint。
+            self.store.purge_delete_residue()
         return total
 
     def consolidate(self, now: int | None = None) -> dict[str, int]:
@@ -599,8 +661,11 @@ class MemoryEngine:
         for item in anchors:
             created = _hypothesis_age_base(item)
             if item.get('status') == 'hypothesis' and created < cutoff:
-                if self.store.delete_permanent('anchors', item['id']).get('ok'):
+                if self.store.delete_permanent(
+                        'anchors', item['id'], purge_residue=False).get('ok'):
                     counts['hypotheses'] += 1
+        if counts['hypotheses']:
+            self.store.purge_delete_residue()
         if not self.settings.get('consolidate_duplicates', True):
             return counts
         anchors = [item for item in self.store.all_memories(
