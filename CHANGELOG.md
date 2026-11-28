@@ -11,7 +11,7 @@
 - L6 固定假设：`pin` 前先走 `confirm` 重分类，不再留下 pinned + kind=hypothesis 的条目。
 - L8/L9：`delete_working_turn` 的 `_delete_candidates` 加异常兜底；预算注释改为「用尽即终止」。
 - 测试：新增 `tests/test_review_a1809.py` 9 项；全量 284 项（283 passed + 1 skipped），`ruff check` 通过；本地 SQLite 3.53.1。
-- 版本 0.6.3（待发布）。
+- 版本 0.6.3（已发布 GitHub Release `v0.6.3`；Market 待同步）。
 
 ## 0.6.2（A1755 增量复审修复）
 

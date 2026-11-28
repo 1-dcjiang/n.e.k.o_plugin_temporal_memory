@@ -29,7 +29,7 @@ v0.4 的核心原则：
 - **召回内容当不可信数据**：整块包 `<memory_data untrusted>`，所有字段折行并转义；`remember` 默认不置顶，标签走白名单，写入按角色限速。
 - **容量可回收**：5000 条上限只统计有效和待确认；面板移除、到期休眠立刻释放名额，另有「清理旧记忆」永久删除全部已加载角色库中已移除超过 30 天或距最后一次确认超过 365 天且未固定的条目。召回只增加召回计数，**不刷新「最后确认时间」**，休眠倒计时只认确认和纠正。
 
-> 当前状态：最近发布仍是 v0.6.2（源码 `f40c058`）。A1809 增量深审修复已在 0.6.3 分支完成：新增 `tests/test_review_a1809.py` 9 项，全量 284 项（283 passed + 1 skipped），`ruff check` 通过；尚未创建 tag/Release，也未同步 Market。
+> 当前状态：v0.6.3 已发布 GitHub Release（Latest），源码提交 `88caa95`。A1809 增量深审修复随 0.6.3 发布：新增 `tests/test_review_a1809.py` 9 项，全量 284 项（283 passed + 1 skipped），`ruff check` 通过；GitHub Actions Verify 与 Release 均成功。Release 资产 `temporal_memory.neko-plugin` 的 SHA256 为 `75b7edf221c24e739d131509a34a9ef11f3acf93eefe729142e703d02d8607da`，`payload_hash_verified=True`。Market 尚未同步。
 
 ## v0.6.0 新增能力
 
